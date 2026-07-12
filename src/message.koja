@@ -15,11 +15,17 @@ priv enum Backend
   AuthenticationSASLContinue(String)
   AuthenticationSASLFinal(String)
   BackendKeyData
+  BindComplete
   CommandComplete(String)
   DataRow(List<Option<String>>)
+  EmptyQueryResponse
   ErrorResponse(ServerError)
+  NoData
   Other
+  ParameterDescription
   ParameterStatus
+  ParseComplete
+  PortalSuspended
   ReadyForQuery
   RowDescription(List<String>)
 end
@@ -77,6 +83,65 @@ priv struct Message
     <<0x70::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
   end
 
+  fn encode_parse(sql: String) -> Binary
+    # Builds a Parse (`P`) message for the unnamed prepared statement
+    # with no pre-declared parameter types (the server infers them).
+
+    body = Message.cstring("") <> Message.cstring(sql) <> <<0::16>>
+    <<0x50::8>> <> <<(body.byte_size() + 4)::32>> <> body
+  end
+
+  fn encode_bind(params: List<Option<String>>) -> Binary
+    # Builds a Bind (`B`) message binding text-format parameters to
+    # the unnamed statement and portal, with text-format results.
+
+    body = Message.cstring("") <> Message.cstring("") <> <<0::16>> <>
+      <<(params.length())::16>> <>
+      Message.encode_bind_parameters(params) <>
+      <<0::16>>
+
+    <<0x42::8>> <> <<(body.byte_size() + 4)::32>> <> body
+  end
+
+  fn encode_describe_portal -> Binary
+    # Builds a Describe (`D`) message for the unnamed portal, so the
+    # server sends RowDescription (or NoData) before the rows.
+
+    body = <<0x50::8>> <> Message.cstring("")
+    <<0x44::8>> <> <<(body.byte_size() + 4)::32>> <> body
+  end
+
+  fn encode_execute -> Binary
+    # Builds an Execute (`E`) message running the unnamed portal with
+    # no row limit.
+
+    body = Message.cstring("") <> <<0::32>>
+    <<0x45::8>> <> <<(body.byte_size() + 4)::32>> <> body
+  end
+
+  fn encode_sync -> Binary
+    # Builds a Sync (`S`) message closing the extended-protocol cycle.
+
+    <<0x53::8>> <> <<4::32>>
+  end
+
+  priv fn encode_bind_parameters(params: List<Option<String>>) -> Binary
+    out: Binary = <<>>
+
+    for param in params
+      match param
+        Option.Some(text) ->
+          bytes = text.to_binary()
+          out = out <> <<(bytes.byte_size())::32>> <> bytes
+
+        Option.None ->
+          out = out <> <<NULL_VALUE::32>>
+      end
+    end
+
+    out
+  end
+
   fn decode(message: Binary) -> Backend
     # Decodes one framed backend message (header included) into a
     # `Backend` value.
@@ -89,14 +154,20 @@ priv struct Message
 
   priv fn dispatch(tag: Int, body: Binary) -> Backend
     match tag
+      49 -> Backend.ParseComplete
+      50 -> Backend.BindComplete
       67 -> Message.decode_command_complete(body)
       68 -> Message.decode_data_row(body)
       69 -> Message.decode_error(body)
+      73 -> Backend.EmptyQueryResponse
       75 -> Backend.BackendKeyData
       82 -> Message.decode_auth(body)
       83 -> Backend.ParameterStatus
       84 -> Message.decode_row_description(body)
       90 -> Backend.ReadyForQuery
+      110 -> Backend.NoData
+      115 -> Backend.PortalSuspended
+      116 -> Backend.ParameterDescription
       _ -> Backend.Other
     end
   end

@@ -60,6 +60,32 @@ struct Connection
   end
 
   @doc """
+  Runs a single SQL statement with `$1`-style parameters via the
+  extended query protocol. Parameters are text-format;
+  `Option.None` binds SQL NULL. Returns the updated connection
+  paired with the query outcome.
+  """
+  fn execute(self, sql: String, params: List<Option<String>>)
+    -> Pair<Connection, Result<QueryResult, Error>>
+
+    payload = Message.encode_parse(sql) <> Message.encode_bind(params) <>
+      Message.encode_describe_portal() <>
+      Message.encode_execute() <>
+      Message.encode_sync()
+
+    match Wire.write_all(self.socket, payload)
+      Result.Err(e) -> return Pair.new(self, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
+
+    outcome = Connection.collect(self.socket, self.buffer, QueryState.empty())
+    Pair.new(
+      Connection{buffer: outcome.first, socket: self.socket},
+      outcome.second,
+    )
+  end
+
+  @doc """
   Sends a Terminate message (best effort) and closes the socket.
   """
   fn close(self) -> Result<Bool, Error>

@@ -198,6 +198,133 @@ struct MessageTest
     end
   end
 
+  @test "encode_parse frames the unnamed statement"
+  fn test_encode_parse -> Result<Bool, String>
+    encoded = Message.encode_parse("SELECT $1")
+
+    match encoded
+      <<tag::8, len::32, body: Binary>> ->
+        unless tag == 0x50
+          return Result.Err("expected tag P (0x50), got #{tag}")
+        end
+
+        unless len == body.byte_size() + 4
+          return Result.Err("length prefix #{len} != #{body.byte_size() + 4}")
+        end
+
+        # Body: empty statement name, the SQL text, then zero
+        # pre-declared parameter types.
+        name_pair =
+          match Wire.take_cstring(body)
+            Option.Some(p) -> p
+            Option.None -> return Result.Err("missing statement name")
+          end
+
+        unless name_pair.first == ""
+          return Result.Err("expected unnamed statement, got `#{name_pair.first}`")
+        end
+
+        sql_pair =
+          match Wire.take_cstring(name_pair.second)
+            Option.Some(p) -> p
+            Option.None -> return Result.Err("missing SQL text")
+          end
+
+        unless sql_pair.first == "SELECT $1"
+          return Result.Err("expected `SELECT $1`, got `#{sql_pair.first}`")
+        end
+
+        match sql_pair.second
+          <<0::16>> -> Result.Ok(true)
+          _ -> Result.Err("expected zero parameter types")
+        end
+
+      _ ->
+        Result.Err("parse message shorter than its header")
+    end
+  end
+
+  @test "encode_bind carries text and NULL parameters"
+  fn test_encode_bind -> Result<Bool, String>
+    params: List<Option<String>> = [Option.Some("42"), Option.None]
+    encoded = Message.encode_bind(params)
+
+    match encoded
+      <<tag::8, len::32, body: Binary>> ->
+        unless tag == 0x42
+          return Result.Err("expected tag B (0x42), got #{tag}")
+        end
+
+        unless len == body.byte_size() + 4
+          return Result.Err("length prefix #{len} != #{body.byte_size() + 4}")
+        end
+
+        # Body: portal "", statement "", 0 format codes, 2 params:
+        # int32 2 + "42", int32 -1 (NULL), then 0 result formats.
+        match body
+          <<0::8, 0::8, 0::16, 2::16, 2::32, 52::8, 50::8, 4294967295::32, 0::16>> ->
+            Result.Ok(true)
+
+          _ ->
+            Result.Err("bind body bytes did not match the expected layout")
+        end
+
+      _ ->
+        Result.Err("bind message shorter than its header")
+    end
+  end
+
+  @test "encode_describe_portal, encode_execute, and encode_sync frame correctly"
+  fn test_encode_describe_execute_sync -> Result<Bool, String>
+    match Message.encode_describe_portal()
+      <<0x44::8, 6::32, 0x50::8, 0::8>> -> ()
+      _ -> return Result.Err("unexpected Describe frame")
+    end
+
+    match Message.encode_execute()
+      <<0x45::8, 9::32, 0::8, 0::32>> -> ()
+      _ -> return Result.Err("unexpected Execute frame")
+    end
+
+    match Message.encode_sync()
+      <<0x53::8, 4::32>> -> Result.Ok(true)
+      _ -> Result.Err("unexpected Sync frame")
+    end
+  end
+
+  @test "decode recognizes the extended-protocol responses"
+  fn test_decode_extended_responses -> Result<Bool, String>
+    match Message.decode(MessageTest.frame(49, <<>>))
+      Backend.ParseComplete -> ()
+      _ -> return Result.Err("expected Backend.ParseComplete for '1'")
+    end
+
+    match Message.decode(MessageTest.frame(50, <<>>))
+      Backend.BindComplete -> ()
+      _ -> return Result.Err("expected Backend.BindComplete for '2'")
+    end
+
+    match Message.decode(MessageTest.frame(73, <<>>))
+      Backend.EmptyQueryResponse -> ()
+      _ -> return Result.Err("expected Backend.EmptyQueryResponse for 'I'")
+    end
+
+    match Message.decode(MessageTest.frame(110, <<>>))
+      Backend.NoData -> ()
+      _ -> return Result.Err("expected Backend.NoData for 'n'")
+    end
+
+    match Message.decode(MessageTest.frame(115, <<>>))
+      Backend.PortalSuspended -> ()
+      _ -> return Result.Err("expected Backend.PortalSuspended for 's'")
+    end
+
+    match Message.decode(MessageTest.frame(116, <<2::16, 0::32, 0::32>>))
+      Backend.ParameterDescription -> Result.Ok(true)
+      _ -> Result.Err("expected Backend.ParameterDescription for 't'")
+    end
+  end
+
   @test "decode maps unknown tags to Other"
   fn test_decode_unknown -> Result<Bool, String>
     match Message.decode(MessageTest.frame(33, <<>>))
