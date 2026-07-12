@@ -31,10 +31,9 @@ priv enum Backend
 end
 
 priv struct Message
+  # Builds a StartupMessage announcing the user and database. It
+  # carries no leading type byte, only a length prefix.
   fn encode_startup(user: String, database: String) -> Binary
-    # Builds a StartupMessage announcing the user and database. It
-    # carries no leading type byte, only a length prefix.
-
     params = Message.cstring("user") <> Message.cstring(user) <>
       Message.cstring("database") <>
       Message.cstring(database) <>
@@ -44,30 +43,26 @@ priv struct Message
     <<(body.byte_size() + 4)::32>> <> body
   end
 
+  # Builds a simple Query (`Q`) message wrapping the given SQL text.
   fn encode_query(sql: String) -> Binary
-    # Builds a simple Query (`Q`) message wrapping the given SQL text.
-
     payload = Message.cstring(sql)
     <<0x51::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
   end
 
+  # Builds a Terminate (`X`) message announcing a clean shutdown.
   fn encode_terminate -> Binary
-    # Builds a Terminate (`X`) message announcing a clean shutdown.
-
     <<0x58::8>> <> <<4::32>>
   end
 
+  # Builds a PasswordMessage (`p`) carrying a cleartext password.
   fn encode_password(password: String) -> Binary
-    # Builds a PasswordMessage (`p`) carrying a cleartext password.
-
     payload = Message.cstring(password)
     <<0x70::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
   end
 
+  # Builds a SASLInitialResponse (`p`): mechanism name plus the
+  # length-prefixed client-first-message.
   fn encode_sasl_initial(mechanism: String, response: String) -> Binary
-    # Builds a SASLInitialResponse (`p`): mechanism name plus the
-    # length-prefixed client-first-message.
-
     response_bytes = response.to_binary()
     payload = Message.cstring(mechanism) <> <<(response_bytes.byte_size())::32>> <>
       response_bytes
@@ -75,26 +70,22 @@ priv struct Message
     <<0x70::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
   end
 
+  # Builds a SASLResponse (`p`) carrying the raw client-final-message.
   fn encode_sasl_response(response: String) -> Binary
-    # Builds a SASLResponse (`p`) carrying the raw
-    # client-final-message.
-
     payload = response.to_binary()
     <<0x70::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
   end
 
+  # Builds a Parse (`P`) message for the unnamed prepared statement
+  # with no pre-declared parameter types (the server infers them).
   fn encode_parse(sql: String) -> Binary
-    # Builds a Parse (`P`) message for the unnamed prepared statement
-    # with no pre-declared parameter types (the server infers them).
-
     body = Message.cstring("") <> Message.cstring(sql) <> <<0::16>>
     <<0x50::8>> <> <<(body.byte_size() + 4)::32>> <> body
   end
 
+  # Builds a Bind (`B`) message binding text-format parameters to
+  # the unnamed statement and portal, with text-format results.
   fn encode_bind(params: List<Option<String>>) -> Binary
-    # Builds a Bind (`B`) message binding text-format parameters to
-    # the unnamed statement and portal, with text-format results.
-
     body = Message.cstring("") <> Message.cstring("") <> <<0::16>> <>
       <<(params.length())::16>> <>
       Message.encode_bind_parameters(params) <>
@@ -103,25 +94,22 @@ priv struct Message
     <<0x42::8>> <> <<(body.byte_size() + 4)::32>> <> body
   end
 
+  # Builds a Describe (`D`) message for the unnamed portal, so the
+  # server sends RowDescription (or NoData) before the rows.
   fn encode_describe_portal -> Binary
-    # Builds a Describe (`D`) message for the unnamed portal, so the
-    # server sends RowDescription (or NoData) before the rows.
-
     body = <<0x50::8>> <> Message.cstring("")
     <<0x44::8>> <> <<(body.byte_size() + 4)::32>> <> body
   end
 
+  # Builds an Execute (`E`) message running the unnamed portal with
+  # no row limit.
   fn encode_execute -> Binary
-    # Builds an Execute (`E`) message running the unnamed portal with
-    # no row limit.
-
     body = Message.cstring("") <> <<0::32>>
     <<0x45::8>> <> <<(body.byte_size() + 4)::32>> <> body
   end
 
+  # Builds a Sync (`S`) message closing the extended-protocol cycle.
   fn encode_sync -> Binary
-    # Builds a Sync (`S`) message closing the extended-protocol cycle.
-
     <<0x53::8>> <> <<4::32>>
   end
 
@@ -142,10 +130,9 @@ priv struct Message
     out
   end
 
+  # Decodes one framed backend message (header included) into a
+  # `Backend` value.
   fn decode(message: Binary) -> Backend
-    # Decodes one framed backend message (header included) into a
-    # `Backend` value.
-
     match message
       <<tag::8, _len::32, body: Binary>> -> Message.dispatch(tag, body)
       _ -> Backend.Other
@@ -190,10 +177,9 @@ priv struct Message
     end
   end
 
+  # The AuthenticationSASL body: NUL-terminated mechanism names ended
+  # by an empty string.
   priv fn decode_sasl_mechanisms(body: Binary) -> Backend
-    # The AuthenticationSASL body: NUL-terminated mechanism names ended
-    # by an empty string.
-
     mechanisms: List<String> = List.new()
     rest = body
 
@@ -211,10 +197,9 @@ priv struct Message
     Backend.AuthenticationSASL(mechanisms)
   end
 
+  # SASLContinue/SASLFinal payloads are raw bytes but always printable
+  # SCRAM attribute text.
   priv fn sasl_payload(body: Binary, continuing: Bool) -> Backend
-    # SASLContinue/SASLFinal payloads are raw bytes but always printable
-    # SCRAM attribute text.
-
     match body.to_string()
       Result.Ok(text) ->
         continuing
@@ -238,11 +223,10 @@ priv struct Message
     Backend.ErrorResponse(Message.scan_error(body, empty))
   end
 
+  # Walks the ErrorResponse field list (one-byte field tag followed by
+  # a NUL-terminated value, terminated by a zero byte), keeping the
+  # severity (`S`), SQLSTATE code (`C`), and message (`M`) fields.
   priv fn scan_error(body: Binary, acc: ServerError) -> ServerError
-    # Walks the ErrorResponse field list (one-byte field tag followed by
-    # a NUL-terminated value, terminated by a zero byte), keeping the
-    # severity (`S`), SQLSTATE code (`C`), and message (`M`) fields.
-
     match body
       <<0::8, _rest: Binary>> ->
         acc

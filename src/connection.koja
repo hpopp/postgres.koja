@@ -97,11 +97,10 @@ struct Connection
     end
   end
 
+  # Pumps startup-phase messages until the server reports
+  # ReadyForQuery, answering authentication requests along the way.
   priv fn handshake(socket: TCPSocket, buffer: Binary, config: Config)
     -> Result<Binary, Error>
-
-    # Pumps startup-phase messages until the server reports
-    # ReadyForQuery, answering authentication requests along the way.
 
     pair =
       match Wire.read_message(socket, buffer)
@@ -154,17 +153,16 @@ struct Connection
     end
   end
 
+  # Runs the SCRAM-SHA-256 exchange: client-first, server-first,
+  # client-final, server-final (verified). Returns the unconsumed
+  # read buffer; the following AuthenticationOk/ReadyForQuery
+  # messages are left for `handshake`.
   priv fn sasl_authenticate(
     socket: TCPSocket,
     buffer: Binary,
     config: Config,
     mechanisms: List<String>,
   ) -> Result<Binary, Error>
-
-    # Runs the SCRAM-SHA-256 exchange: client-first, server-first,
-    # client-final, server-final (verified). Returns the unconsumed
-    # read buffer; the following AuthenticationOk/ReadyForQuery
-    # messages are left for `handshake`.
 
     unless mechanisms.any?(m -> m == "SCRAM-SHA-256")
       return Result.Err(Error.UnsupportedAuthentication("server offered no supported SASL mechanism"))
@@ -235,10 +233,9 @@ struct Connection
     end
   end
 
+  # Reads and decodes one message during the SASL exchange.
   priv fn read_auth_message(socket: TCPSocket, buffer: Binary)
     -> Result<Pair<Backend, Binary>, Error>
-
-    # Reads and decodes one message during the SASL exchange.
 
     match Wire.read_message(socket, buffer)
       Result.Ok(pair) ->

@@ -66,11 +66,10 @@ priv struct Base64
     Result.Ok(out)
   end
 
+  # Decodes one 4-character group. Padding may only appear in the last
+  # group, as `xx==` (one byte) or `xxx=` (two bytes).
   priv fn decode_quad(s0: Int, s1: Int, s2: Int, s3: Int, last: Bool)
     -> Result<Binary, String>
-
-    # Decodes one 4-character group. Padding may only appear in the last
-    # group, as `xx==` (one byte) or `xxx=` (two bytes).
 
     if s0 < 0 or s1 < 0
       return Result.Err("invalid base64 character")

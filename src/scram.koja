@@ -32,29 +32,26 @@ priv struct Scram
     Base64.encode(Random.bytes(18))
   end
 
+  # The client-first-message-bare. Postgres ignores the SCRAM username
+  # (it uses the startup user), so the connection layer passes "",
+  # matching libpq; tests pass the RFC vector's username.
   fn first_bare(username: String, nonce: String) -> String
-    # The client-first-message-bare. Postgres ignores the SCRAM username
-    # (it uses the startup user), so the connection layer passes "",
-    # matching libpq; tests pass the RFC vector's username.
-
     "n=" <> username <> ",r=" <> nonce
   end
 
+  # The full client-first-message including the gs2 header.
   fn first_message(username: String, nonce: String) -> String
-    # The full client-first-message including the gs2 header.
-
     "n,," <> Scram.first_bare(username, nonce)
   end
 
+  # Computes the client-final-message and the expected server
+  # signature from the server's first message.
   fn proof(
     password: String,
     username: String,
     client_nonce: String,
     server_first: String,
   ) -> Result<ScramProof, String>
-
-    # Computes the client-final-message and the expected server
-    # signature from the server's first message.
 
     parsed =
       match Scram.parse_server_first(server_first)
@@ -88,11 +85,10 @@ priv struct Scram
     })
   end
 
+  # Checks the server-final-message (`v=<base64 signature>`) against
+  # the signature computed during `proof`.
   fn verify_server_final(server_final: String, expected_signature: String)
     -> Result<Bool, String>
-
-    # Checks the server-final-message (`v=<base64 signature>`) against
-    # the signature computed during `proof`.
 
     unless server_final.starts_with?("v=")
       return Result.Err("malformed server-final-message: " <> server_final)
@@ -156,10 +152,9 @@ priv struct Scram
     part.slice(Range{start: 2, stop: part.length() - 1})
   end
 
+  # Hi(str, salt, i) from RFC 5802: PBKDF2-HMAC-SHA-256 with one
+  # output block.
   priv fn hi(password: Binary, salt: Binary, iterations: Int) -> Binary
-    # Hi(str, salt, i) from RFC 5802: PBKDF2-HMAC-SHA-256 with one
-    # output block.
-
     u = HMAC.sha256(password, salt <> <<1::32>>)
     acc = u
     round = 1

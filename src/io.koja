@@ -11,20 +11,18 @@ alias Net.TLSError
 # non-blocking socket would block, the calling process suspends
 # cooperatively until the fd is ready, then retries.
 priv struct Wire
+  # Writes every byte of `data` to the socket, looping until the whole
+  # buffer is flushed. Returns the number of bytes written.
   fn write_all(socket: TCPSocket, data: Binary) -> Result<Int, Error>
-    # Writes every byte of `data` to the socket, looping until the whole
-    # buffer is flushed. Returns the number of bytes written.
-
     Wire.write_from(socket, data, 0)
   end
 
+  # Reads one complete backend message from `socket`. `buffer` carries
+  # bytes already read past the previous message. Returns the framed
+  # message (type byte + length prefix + body) paired with the leftover
+  # bytes to feed into the next read.
   fn read_message(socket: TCPSocket, buffer: Binary)
     -> Result<Pair<Binary, Binary>, Error>
-
-    # Reads one complete backend message from `socket`. `buffer` carries
-    # bytes already read past the previous message. Returns the framed
-    # message (type byte + length prefix + body) paired with the leftover
-    # bytes to feed into the next read.
 
     buffer =
       match Wire.fill(socket, buffer, 5)
@@ -49,10 +47,9 @@ priv struct Wire
     Result.Ok(Wire.split_at(buffer, total))
   end
 
+  # Splits `data` into the first `n` bytes and the remainder, clamping
+  # `n` to the available length.
   fn split_at(data: Binary, n: Int) -> Pair<Binary, Binary>
-    # Splits `data` into the first `n` bytes and the remainder, clamping
-    # `n` to the available length.
-
     size = data.byte_size()
     head_len = n > size ? size : n
     head = CPtr.borrow(data).to_binary(head_len)
@@ -60,36 +57,32 @@ priv struct Wire
     Pair{first: head, second: tail}
   end
 
+  # Pulls a big-endian unsigned 16-bit integer off the front of `data`,
+  # returning it with the remaining bytes.
   fn take_u16(data: Binary) -> Option<Pair<Int, Binary>>
-    # Pulls a big-endian unsigned 16-bit integer off the front of `data`,
-    # returning it with the remaining bytes.
-
     match data
       <<n::16, rest: Binary>> -> Option.Some(Pair{first: n, second: rest})
       _ -> Option.None
     end
   end
 
+  # Pulls a big-endian unsigned 32-bit integer off the front of `data`,
+  # returning it with the remaining bytes.
   fn take_u32(data: Binary) -> Option<Pair<Int, Binary>>
-    # Pulls a big-endian unsigned 32-bit integer off the front of `data`,
-    # returning it with the remaining bytes.
-
     match data
       <<n::32, rest: Binary>> -> Option.Some(Pair{first: n, second: rest})
       _ -> Option.None
     end
   end
 
+  # Reads a NUL-terminated string off the front of `data`, returning
+  # the decoded text and the bytes after the terminator.
   fn take_cstring(data: Binary) -> Option<Pair<String, Binary>>
-    # Reads a NUL-terminated string off the front of `data`, returning
-    # the decoded text and the bytes after the terminator.
-
     Wire.scan_cstring(data, <<>>)
   end
 
+  # Returns the byte at `index`, or 0 out of bounds.
   fn byte_at(data: Binary, index: Int) -> Int
-    # Returns the byte at `index`, or 0 out of bounds.
-
     match data.at(index)
       Option.Some(b) -> b
       Option.None -> 0
