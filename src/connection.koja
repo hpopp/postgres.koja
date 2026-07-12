@@ -13,10 +13,9 @@ struct Connection
   socket: TCPSocket
 
   @doc """
-  Opens a connection, performs the startup handshake, and waits for
-  the server to report it is ready for queries. Only trust
-  authentication is supported; other methods fail with
-  `Error.UnsupportedAuthentication`.
+  Opens a connection, performs the startup handshake (trust,
+  cleartext password, or SCRAM-SHA-256 as the server demands), and
+  waits for the server to report it is ready for queries.
   """
   fn connect(config: Config) -> Result<Connection, Error>
     socket =
@@ -34,7 +33,7 @@ struct Connection
 
     buffer: Binary = <<>>
 
-    match Connection.await_ready(socket, buffer)
+    match Connection.handshake(socket, buffer, config)
       Result.Ok(leftover) ->
         Result.Ok(Connection{buffer: leftover, socket: socket})
 
@@ -72,8 +71,11 @@ struct Connection
     end
   end
 
-  priv fn await_ready(socket: TCPSocket, buffer: Binary)
+  priv fn handshake(socket: TCPSocket, buffer: Binary, config: Config)
     -> Result<Binary, Error>
+
+    # Pumps startup-phase messages until the server reports
+    # ReadyForQuery, answering authentication requests along the way.
 
     pair =
       match Wire.read_message(socket, buffer)
@@ -88,13 +90,146 @@ struct Connection
       Backend.ErrorResponse(server_error) ->
         Result.Err(Error.Server(server_error))
 
+      Backend.AuthenticationCleartextPassword ->
+        password =
+          match Connection.require_password(config)
+            Result.Ok(p) -> p
+            Result.Err(e) -> return Result.Err(e)
+          end
+
+        match Wire.write_all(socket, Message.encode_password(password))
+          Result.Err(e) -> return Result.Err(e)
+          Result.Ok(_) -> ()
+        end
+
+        Connection.handshake(socket, pair.second, config)
+
+      Backend.AuthenticationSASL(mechanisms) ->
+        leftover =
+          match Connection.sasl_authenticate(
+            socket,
+            pair.second,
+            config,
+            mechanisms,
+          )
+            Result.Ok(l) -> l
+            Result.Err(e) -> return Result.Err(e)
+          end
+
+        Connection.handshake(socket, leftover, config)
+
       Backend.AuthenticationOther(kind) ->
         Result.Err(Error.UnsupportedAuthentication(Connection.auth_method_name(
           kind,
         )))
 
       _ ->
-        Connection.await_ready(socket, pair.second)
+        Connection.handshake(socket, pair.second, config)
+    end
+  end
+
+  priv fn sasl_authenticate(
+    socket: TCPSocket,
+    buffer: Binary,
+    config: Config,
+    mechanisms: List<String>,
+  ) -> Result<Binary, Error>
+
+    # Runs the SCRAM-SHA-256 exchange: client-first, server-first,
+    # client-final, server-final (verified). Returns the unconsumed
+    # read buffer; the following AuthenticationOk/ReadyForQuery
+    # messages are left for `handshake`.
+
+    unless mechanisms.any?(m -> m == "SCRAM-SHA-256")
+      return Result.Err(Error.UnsupportedAuthentication("server offered no supported SASL mechanism"))
+    end
+
+    password =
+      match Connection.require_password(config)
+        Result.Ok(p) -> p
+        Result.Err(e) -> return Result.Err(e)
+      end
+
+    nonce = Scram.generate_nonce()
+    initial = Message.encode_sasl_initial(
+      "SCRAM-SHA-256",
+      Scram.first_message("", nonce),
+    )
+
+    match Wire.write_all(socket, initial)
+      Result.Err(e) -> return Result.Err(e)
+      Result.Ok(_) -> ()
+    end
+
+    continue_pair =
+      match Connection.read_auth_message(socket, buffer)
+        Result.Ok(p) -> p
+        Result.Err(e) -> return Result.Err(e)
+      end
+
+    server_first =
+      match continue_pair.first
+        Backend.AuthenticationSASLContinue(text) -> text
+        Backend.ErrorResponse(server_error) ->
+          return Result.Err(Error.Server(server_error))
+        _ -> return Result.Err(Error.Protocol("expected SASL continue message"))
+      end
+
+    proof =
+      match Scram.proof(password, "", nonce, server_first)
+        Result.Ok(p) -> p
+        Result.Err(e) -> return Result.Err(Error.AuthenticationFailed(e))
+      end
+
+    match Wire.write_all(
+      socket,
+      Message.encode_sasl_response(proof.client_final),
+    )
+      Result.Err(e) -> return Result.Err(e)
+      Result.Ok(_) -> ()
+    end
+
+    final_pair =
+      match Connection.read_auth_message(socket, continue_pair.second)
+        Result.Ok(p) -> p
+        Result.Err(e) -> return Result.Err(e)
+      end
+
+    server_final =
+      match final_pair.first
+        Backend.AuthenticationSASLFinal(text) -> text
+        Backend.ErrorResponse(server_error) ->
+          return Result.Err(Error.Server(server_error))
+        _ -> return Result.Err(Error.Protocol("expected SASL final message"))
+      end
+
+    match Scram.verify_server_final(server_final, proof.server_signature)
+      Result.Ok(_) -> Result.Ok(final_pair.second)
+      Result.Err(e) -> Result.Err(Error.AuthenticationFailed(e))
+    end
+  end
+
+  priv fn read_auth_message(socket: TCPSocket, buffer: Binary)
+    -> Result<Pair<Backend, Binary>, Error>
+
+    # Reads and decodes one message during the SASL exchange.
+
+    match Wire.read_message(socket, buffer)
+      Result.Ok(pair) ->
+        Result.Ok(Pair.new(Message.decode(pair.first), pair.second))
+
+      Result.Err(e) ->
+        Result.Err(e)
+    end
+  end
+
+  priv fn require_password(config: Config) -> Result<String, Error>
+    match config.password
+      Option.Some(password) ->
+        Result.Ok(password)
+
+      Option.None ->
+        Result.Err(Error.AuthenticationFailed("server requested a password but none was configured"))
     end
   end
 

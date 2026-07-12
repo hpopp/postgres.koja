@@ -87,6 +87,15 @@ priv struct Wire
     Wire.scan_cstring(data, <<>>)
   end
 
+  fn byte_at(data: Binary, index: Int) -> Int
+    # Returns the byte at `index`, or 0 out of bounds.
+
+    match data.at(index)
+      Option.Some(b) -> b
+      Option.None -> 0
+    end
+  end
+
   priv fn scan_cstring(data: Binary, acc: Binary)
     -> Option<Pair<String, Binary>>
 

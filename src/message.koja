@@ -8,8 +8,12 @@ priv const NULL_VALUE: Int = 4294967295
 priv const PROTOCOL_VERSION: Int = 196608
 
 priv enum Backend
+  AuthenticationCleartextPassword
   AuthenticationOk
   AuthenticationOther(Int)
+  AuthenticationSASL(List<String>)
+  AuthenticationSASLContinue(String)
+  AuthenticationSASLFinal(String)
   BackendKeyData
   CommandComplete(String)
   DataRow(List<Option<String>>)
@@ -47,6 +51,32 @@ priv struct Message
     <<0x58::8>> <> <<4::32>>
   end
 
+  fn encode_password(password: String) -> Binary
+    # Builds a PasswordMessage (`p`) carrying a cleartext password.
+
+    payload = Message.cstring(password)
+    <<0x70::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
+  end
+
+  fn encode_sasl_initial(mechanism: String, response: String) -> Binary
+    # Builds a SASLInitialResponse (`p`): mechanism name plus the
+    # length-prefixed client-first-message.
+
+    response_bytes = response.to_binary()
+    payload = Message.cstring(mechanism) <> <<(response_bytes.byte_size())::32>> <>
+      response_bytes
+
+    <<0x70::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
+  end
+
+  fn encode_sasl_response(response: String) -> Binary
+    # Builds a SASLResponse (`p`) carrying the raw
+    # client-final-message.
+
+    payload = response.to_binary()
+    <<0x70::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
+  end
+
   fn decode(message: Binary) -> Backend
     # Decodes one framed backend message (header included) into a
     # `Backend` value.
@@ -73,12 +103,54 @@ priv struct Message
 
   priv fn decode_auth(body: Binary) -> Backend
     match Wire.take_u32(body)
-      Option.Some(pair) ->
-        pair.first == 0
-          ? Backend.AuthenticationOk
-          : Backend.AuthenticationOther(pair.first)
+      Option.Some(pair) -> Message.auth_request(pair.first, pair.second)
+      Option.None -> Backend.Other
+    end
+  end
 
-      Option.None ->
+  priv fn auth_request(code: Int, rest: Binary) -> Backend
+    match code
+      0 -> Backend.AuthenticationOk
+      3 -> Backend.AuthenticationCleartextPassword
+      10 -> Message.decode_sasl_mechanisms(rest)
+      11 -> Message.sasl_payload(rest, true)
+      12 -> Message.sasl_payload(rest, false)
+      _ -> Backend.AuthenticationOther(code)
+    end
+  end
+
+  priv fn decode_sasl_mechanisms(body: Binary) -> Backend
+    # The AuthenticationSASL body: NUL-terminated mechanism names ended
+    # by an empty string.
+
+    mechanisms: List<String> = List.new()
+    rest = body
+
+    while rest.byte_size() > 1
+      match Wire.take_cstring(rest)
+        Option.Some(pair) ->
+          mechanisms = mechanisms.append(pair.first)
+          rest = pair.second
+
+        Option.None ->
+          return Backend.AuthenticationSASL(mechanisms)
+      end
+    end
+
+    Backend.AuthenticationSASL(mechanisms)
+  end
+
+  priv fn sasl_payload(body: Binary, continuing: Bool) -> Backend
+    # SASLContinue/SASLFinal payloads are raw bytes but always printable
+    # SCRAM attribute text.
+
+    match body.to_string()
+      Result.Ok(text) ->
+        continuing
+          ? Backend.AuthenticationSASLContinue(text)
+          : Backend.AuthenticationSASLFinal(text)
+
+      Result.Err(_) ->
         Backend.Other
     end
   end

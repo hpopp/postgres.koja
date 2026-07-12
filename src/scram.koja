@@ -1,0 +1,189 @@
+alias Crypto.HMAC
+alias Crypto.SHA256
+
+# SCRAM-SHA-256 client per RFC 5802/7677, without channel binding
+# (gs2 header `n,,`). Password normalization (SASLprep) is not
+# applied; ASCII passwords work, exotic Unicode passwords may not.
+#
+# `first_bare` and `proof` are pure so the RFC 7677 example vectors
+# can drive them in unit tests; the connection layer supplies a
+# random nonce.
+
+# base64("n,,"), the channel-binding attribute of the client-final
+# message.
+priv const SCRAM_GS2_B64: String = "biws"
+
+# The client proof and expected server signature derived from one
+# SCRAM exchange.
+priv struct ScramProof
+  client_final: String
+  server_signature: String
+end
+
+# The parsed attributes of a server-first-message.
+priv struct ServerFirst
+  iterations: Int
+  nonce: String
+  salt: Binary
+end
+
+priv struct Scram
+  fn generate_nonce -> String
+    Base64.encode(Random.bytes(18))
+  end
+
+  fn first_bare(username: String, nonce: String) -> String
+    # The client-first-message-bare. Postgres ignores the SCRAM username
+    # (it uses the startup user), so the connection layer passes "",
+    # matching libpq; tests pass the RFC vector's username.
+
+    "n=" <> username <> ",r=" <> nonce
+  end
+
+  fn first_message(username: String, nonce: String) -> String
+    # The full client-first-message including the gs2 header.
+
+    "n,," <> Scram.first_bare(username, nonce)
+  end
+
+  fn proof(
+    password: String,
+    username: String,
+    client_nonce: String,
+    server_first: String,
+  ) -> Result<ScramProof, String>
+
+    # Computes the client-final-message and the expected server
+    # signature from the server's first message.
+
+    parsed =
+      match Scram.parse_server_first(server_first)
+        Result.Ok(p) -> p
+        Result.Err(e) -> return Result.Err(e)
+      end
+
+    unless parsed.nonce.starts_with?(client_nonce)
+      return Result.Err("server nonce does not extend the client nonce")
+    end
+
+    salted = Scram.hi(password.to_binary(), parsed.salt, parsed.iterations)
+    client_key = HMAC.sha256(salted, "Client Key".to_binary())
+    stored_key = SHA256.digest(client_key)
+
+    without_proof = "c=" <> SCRAM_GS2_B64 <> ",r=" <> parsed.nonce
+    auth_message = Scram.first_bare(username, client_nonce) <> "," <>
+      server_first <>
+      "," <>
+      without_proof
+
+    client_signature = HMAC.sha256(stored_key, auth_message.to_binary())
+    client_proof = Scram.xor_bytes(client_key, client_signature)
+
+    server_key = HMAC.sha256(salted, "Server Key".to_binary())
+    server_signature = HMAC.sha256(server_key, auth_message.to_binary())
+
+    Result.Ok(ScramProof{
+      client_final: without_proof <> ",p=" <> Base64.encode(client_proof),
+      server_signature: Base64.encode(server_signature),
+    })
+  end
+
+  fn verify_server_final(server_final: String, expected_signature: String)
+    -> Result<Bool, String>
+
+    # Checks the server-final-message (`v=<base64 signature>`) against
+    # the signature computed during `proof`.
+
+    unless server_final.starts_with?("v=")
+      return Result.Err("malformed server-final-message: " <> server_final)
+    end
+
+    signature = server_final.slice(
+      Range{start: 2, stop: server_final.length() - 1},
+    )
+
+    signature == expected_signature
+      ? Result.Ok(true)
+      : Result.Err("server signature verification failed")
+  end
+
+  priv fn parse_server_first(server_first: String)
+    -> Result<ServerFirst, String>
+
+    nonce = ""
+    salt_b64 = ""
+    iterations_text = ""
+
+    for part in server_first.split(",")
+      if part.starts_with?("r=")
+        nonce = Scram.attribute_value(part)
+      end
+
+      if part.starts_with?("s=")
+        salt_b64 = Scram.attribute_value(part)
+      end
+
+      if part.starts_with?("i=")
+        iterations_text = Scram.attribute_value(part)
+      end
+    end
+
+    if nonce == "" or salt_b64 == "" or iterations_text == ""
+      return Result.Err("malformed server-first-message: " <> server_first)
+    end
+
+    salt =
+      match Base64.decode(salt_b64)
+        Result.Ok(s) -> s
+        Result.Err(e) -> return Result.Err("invalid salt: " <> e)
+      end
+
+    iterations =
+      match iterations_text.to_int()
+        Result.Ok(i) -> i
+        Result.Err(_) ->
+          return Result.Err("invalid iteration count: " <> iterations_text)
+      end
+
+    if iterations < 1
+      return Result.Err("invalid iteration count: " <> iterations_text)
+    end
+
+    Result.Ok(ServerFirst{iterations: iterations, nonce: nonce, salt: salt})
+  end
+
+  priv fn attribute_value(part: String) -> String
+    part.slice(Range{start: 2, stop: part.length() - 1})
+  end
+
+  priv fn hi(password: Binary, salt: Binary, iterations: Int) -> Binary
+    # Hi(str, salt, i) from RFC 5802: PBKDF2-HMAC-SHA-256 with one
+    # output block.
+
+    u = HMAC.sha256(password, salt <> <<1::32>>)
+    acc = u
+    round = 1
+
+    while round < iterations
+      u = HMAC.sha256(password, u)
+      acc = Scram.xor_bytes(acc, u)
+      round += 1
+    end
+
+    acc
+  end
+
+  priv fn xor_bytes(a: Binary, b: Binary) -> Binary
+    out: Binary = <<>>
+    i = 0
+
+    while i < a.byte_size()
+      x = Wire.byte_at(a, i)
+      y = Wire.byte_at(b, i)
+      out = out <> <<(x.bxor(y))::8>>
+      i += 1
+    end
+
+    out
+  end
+end

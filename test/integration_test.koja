@@ -168,6 +168,90 @@ struct IntegrationTest
     end
   end
 
+  @test "connects with a cleartext password"
+  fn test_cleartext_auth -> Result<Bool, String>
+    config = Config.new(TEST_HOST, TEST_PORT, "koja_password", TEST_DATABASE)
+      .with_password("koja_password_secret")
+
+    IntegrationTest.connect_and_select_user(config, "koja_password")
+  end
+
+  @test "connects with SCRAM-SHA-256"
+  fn test_scram_auth -> Result<Bool, String>
+    config = Config.new(TEST_HOST, TEST_PORT, "koja_scram", TEST_DATABASE)
+      .with_password("koja_scram_secret")
+
+    IntegrationTest.connect_and_select_user(config, "koja_scram")
+  end
+
+  @test "rejects a wrong SCRAM password"
+  fn test_scram_wrong_password -> Result<Bool, String>
+    config = Config.new(TEST_HOST, TEST_PORT, "koja_scram", TEST_DATABASE)
+      .with_password("wrong")
+
+    match Connection.connect(config)
+      Result.Ok(conn) ->
+        _ = conn.close()
+        Result.Err("expected authentication to fail")
+
+      Result.Err(Error.Server(server_error)) ->
+        server_error.code == "28P01"
+          ? Result.Ok(true)
+          : Result.Err("expected SQLSTATE 28P01, got #{server_error.code}")
+
+      Result.Err(e) ->
+        Result.Err("expected a server error, got: " <> e.message())
+    end
+  end
+
+  @test "fails clearly when a password is needed but missing"
+  fn test_missing_password -> Result<Bool, String>
+    config = Config.new(TEST_HOST, TEST_PORT, "koja_scram", TEST_DATABASE)
+
+    match Connection.connect(config)
+      Result.Ok(conn) ->
+        _ = conn.close()
+        Result.Err("expected connect to fail without a password")
+
+      Result.Err(Error.AuthenticationFailed(_)) ->
+        Result.Ok(true)
+
+      Result.Err(e) ->
+        Result.Err("expected AuthenticationFailed, got: " <> e.message())
+    end
+  end
+
+  priv fn connect_and_select_user(config: Config, want_user: String)
+    -> Result<Bool, String>
+
+    conn =
+      match Connection.connect(config)
+        Result.Ok(c) -> c
+        Result.Err(e) ->
+          return Result.Err("connect failed (is docker compose up?): " <>
+            e.message())
+      end
+
+    outcome = conn.query("SELECT current_user")
+    _ = outcome.first.close()
+
+    result =
+      match outcome.second
+        Result.Ok(r) -> r
+        Result.Err(e) -> return Result.Err(e.message())
+      end
+
+    match IntegrationTest.cell(result, 0, 0)
+      Option.Some(value) ->
+        value == want_user
+          ? Result.Ok(true)
+          : Result.Err("expected `#{want_user}`, got `#{value}`")
+
+      Option.None ->
+        Result.Err("expected current_user to be non-NULL")
+    end
+  end
+
   priv fn connect_trust -> Result<Connection, String>
     config = Config.new(TEST_HOST, TEST_PORT, "koja_trust", TEST_DATABASE)
 
