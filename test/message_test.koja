@@ -1,0 +1,238 @@
+struct MessageTest
+  @test "encode_startup frames the protocol version and parameters"
+  fn test_encode_startup -> Result<Bool, String>
+    encoded = Message.encode_startup("alice", "appdb")
+
+    match encoded
+      <<len::32, version::32, rest: Binary>> ->
+        unless len == encoded.byte_size()
+          return Result.Err("length prefix #{len} != #{encoded.byte_size()}")
+        end
+
+        unless version == 196608
+          return Result.Err("expected protocol 196608, got #{version}")
+        end
+
+        MessageTest.check_startup_params(rest)
+
+      _ ->
+        Result.Err("startup message shorter than its header")
+    end
+  end
+
+  priv fn check_startup_params(params: Binary) -> Result<Bool, String>
+    expected = ["user", "alice", "database", "appdb"]
+    MessageTest.check_cstrings(params, expected, 0)
+  end
+
+  priv fn check_cstrings(data: Binary, expected: List<String>, index: Int)
+    -> Result<Bool, String>
+
+    match expected.get(index)
+      Option.None ->
+        match data
+          <<0::8>> -> Result.Ok(true)
+          _ -> Result.Err("startup params missing final terminator")
+        end
+
+      Option.Some(want) ->
+        match Wire.take_cstring(data)
+          Option.Some(pair) ->
+            unless pair.first == want
+              return Result.Err("expected `#{want}`, got `#{pair.first}`")
+            end
+
+            MessageTest.check_cstrings(pair.second, expected, index + 1)
+
+          Option.None ->
+            Result.Err("startup params ended before `#{want}`")
+        end
+    end
+  end
+
+  @test "encode_query wraps the SQL in a Q frame"
+  fn test_encode_query -> Result<Bool, String>
+    encoded = Message.encode_query("SELECT 1")
+
+    match encoded
+      <<tag::8, len::32, payload: Binary>> ->
+        unless tag == 0x51
+          return Result.Err("expected tag Q (0x51), got #{tag}")
+        end
+
+        unless len == payload.byte_size() + 4
+          return Result.Err("length prefix #{len} != #{payload.byte_size() + 4}")
+        end
+
+        match Wire.take_cstring(payload)
+          Option.Some(pair) ->
+            pair.first == "SELECT 1"
+              ? Result.Ok(true)
+              : Result.Err("expected `SELECT 1`, got `#{pair.first}`")
+
+          Option.None ->
+            Result.Err("payload is not a NUL-terminated string")
+        end
+
+      _ ->
+        Result.Err("query message shorter than its header")
+    end
+  end
+
+  @test "encode_terminate is a bare X frame"
+  fn test_encode_terminate -> Result<Bool, String>
+    match Message.encode_terminate()
+      <<0x58::8, 4::32>> -> Result.Ok(true)
+      _ -> Result.Err("expected <<X, 4>> frame")
+    end
+  end
+
+  @test "decode recognizes ReadyForQuery"
+  fn test_decode_ready_for_query -> Result<Bool, String>
+    frame = MessageTest.frame(90, <<73::8>>)
+
+    match Message.decode(frame)
+      Backend.ReadyForQuery -> Result.Ok(true)
+      _ -> Result.Err("expected Backend.ReadyForQuery")
+    end
+  end
+
+  @test "decode extracts the CommandComplete tag"
+  fn test_decode_command_complete -> Result<Bool, String>
+    frame = MessageTest.frame(67, MessageTest.cstring("INSERT 0 1"))
+
+    match Message.decode(frame)
+      Backend.CommandComplete(tag) ->
+        tag == "INSERT 0 1"
+          ? Result.Ok(true)
+          : Result.Err("expected `INSERT 0 1`, got `#{tag}`")
+
+      _ ->
+        Result.Err("expected Backend.CommandComplete")
+    end
+  end
+
+  @test "decode collects severity, code, and message from ErrorResponse"
+  fn test_decode_error_response -> Result<Bool, String>
+    body = <<83::8>> <> MessageTest.cstring("ERROR") <> <<86::8>> <>
+      MessageTest.cstring("ERROR") <>
+      <<67::8>> <>
+      MessageTest.cstring("42601") <>
+      <<77::8>> <>
+      MessageTest.cstring("syntax error at or near \"SELEC\"") <>
+      <<0::8>>
+
+    match Message.decode(MessageTest.frame(69, body))
+      Backend.ErrorResponse(server_error) ->
+        unless server_error.severity == "ERROR"
+          return Result.Err("expected severity ERROR, got #{server_error.severity}")
+        end
+
+        unless server_error.code == "42601"
+          return Result.Err("expected code 42601, got #{server_error.code}")
+        end
+
+        unless server_error.message == "syntax error at or near \"SELEC\""
+          return Result.Err("unexpected message: #{server_error.message}")
+        end
+
+        Result.Ok(true)
+
+      _ ->
+        Result.Err("expected Backend.ErrorResponse")
+    end
+  end
+
+  @test "decode reads column names from RowDescription"
+  fn test_decode_row_description -> Result<Bool, String>
+    body = <<2::16>> <> MessageTest.cstring("id") <>
+      MessageTest.field_metadata() <>
+      MessageTest.cstring("name") <>
+      MessageTest.field_metadata()
+
+    match Message.decode(MessageTest.frame(84, body))
+      Backend.RowDescription(fields) ->
+        unless fields.length() == 2
+          return Result.Err("expected 2 fields, got #{fields.length()}")
+        end
+
+        match MessageTest.expect_string(fields.get(0), "id")
+          Result.Err(e) -> return Result.Err(e)
+          Result.Ok(_) -> ()
+        end
+
+        MessageTest.expect_string(fields.get(1), "name")
+
+      _ ->
+        Result.Err("expected Backend.RowDescription")
+    end
+  end
+
+  @test "decode reads text and NULL columns from DataRow"
+  fn test_decode_data_row -> Result<Bool, String>
+    body = <<2::16>> <> <<5::32>> <> "hello".to_binary() <> <<4294967295::32>>
+
+    match Message.decode(MessageTest.frame(68, body))
+      Backend.DataRow(columns) ->
+        unless columns.length() == 2
+          return Result.Err("expected 2 columns, got #{columns.length()}")
+        end
+
+        match columns.get(0)
+          Option.Some(Option.Some(text)) ->
+            unless text == "hello"
+              return Result.Err("expected `hello`, got `#{text}`")
+            end
+
+          _ ->
+            return Result.Err("expected first column to be Some")
+        end
+
+        match columns.get(1)
+          Option.Some(Option.None) -> Result.Ok(true)
+          _ -> Result.Err("expected second column to be NULL")
+        end
+
+      _ ->
+        Result.Err("expected Backend.DataRow")
+    end
+  end
+
+  @test "decode maps unknown tags to Other"
+  fn test_decode_unknown -> Result<Bool, String>
+    match Message.decode(MessageTest.frame(33, <<>>))
+      Backend.Other -> Result.Ok(true)
+      _ -> Result.Err("expected Backend.Other")
+    end
+  end
+
+  priv fn frame(tag: Int, body: Binary) -> Binary
+    <<tag::8>> <> <<(body.byte_size() + 4)::32>> <> body
+  end
+
+  priv fn cstring(s: String) -> Binary
+    s.to_binary() <> <<0::8>>
+  end
+
+  priv fn field_metadata -> Binary
+    # The 18 bytes of per-field metadata (table oid, attribute number,
+    # type oid, type size, type modifier, format code) that follow each
+    # name in a RowDescription.
+
+    <<0::32>> <> <<0::32>> <> <<0::32>> <> <<0::32>> <> <<0::16>>
+  end
+
+  priv fn expect_string(actual: Option<String>, want: String)
+    -> Result<Bool, String>
+
+    match actual
+      Option.Some(s) ->
+        s == want
+          ? Result.Ok(true)
+          : Result.Err("expected `#{want}`, got `#{s}`")
+
+      Option.None ->
+        Result.Err("expected `#{want}`, got None")
+    end
+  end
+end

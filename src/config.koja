@@ -1,0 +1,37 @@
+@doc """
+Connection settings for `Connection.connect`.
+"""
+struct Config
+  database: String
+  host: String
+  password: Option<String>
+  port: Int
+  user: String
+
+  @doc """
+  Builds a config with no password, for servers using trust
+  authentication. Chain `with_password` when the server requires one.
+  """
+  fn new(host: String, port: Int, user: String, database: String) -> Config
+    Config{
+      database: database,
+      host: host,
+      password: Option.None,
+      port: port,
+      user: user,
+    }
+  end
+
+  @doc """
+  Returns the config with the given password set.
+  """
+  fn with_password(self, password: String) -> Config
+    Config{
+      database: self.database,
+      host: self.host,
+      password: Option.Some(password),
+      port: self.port,
+      user: self.user,
+    }
+  end
+end

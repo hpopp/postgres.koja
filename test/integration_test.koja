@@ -1,0 +1,209 @@
+# Integration tests against a live Postgres server. Start it first:
+#
+# docker compose up -d
+#
+priv const TEST_DATABASE: String = "koja_test"
+priv const TEST_HOST: String = "127.0.0.1"
+priv const TEST_PORT: Int = 5434
+
+struct IntegrationTest
+  @test "connects with trust auth and runs SELECT"
+  fn test_trust_select -> Result<Bool, String>
+    conn =
+      match IntegrationTest.connect_trust()
+        Result.Ok(c) -> c
+        Result.Err(e) -> return Result.Err(e)
+      end
+
+    outcome = conn.query("SELECT 1 AS one, 'two' AS two")
+    _ = outcome.first.close()
+
+    result =
+      match outcome.second
+        Result.Ok(r) -> r
+        Result.Err(e) -> return Result.Err(e.message())
+      end
+
+    unless result.tag == "SELECT 1"
+      return Result.Err("expected tag `SELECT 1`, got `#{result.tag}`")
+    end
+
+    unless result.fields.length() == 2
+      return Result.Err("expected 2 fields, got #{result.fields.length()}")
+    end
+
+    match IntegrationTest.cell(result, 0, 0)
+      Option.Some(value) ->
+        unless value == "1"
+          return Result.Err("expected `1`, got `#{value}`")
+        end
+
+      Option.None ->
+        return Result.Err("expected cell (0,0) to be non-NULL")
+    end
+
+    match IntegrationTest.cell(result, 0, 1)
+      Option.Some(value) ->
+        value == "two"
+          ? Result.Ok(true)
+          : Result.Err("expected `two`, got `#{value}`")
+
+      Option.None ->
+        Result.Err("expected cell (0,1) to be non-NULL")
+    end
+  end
+
+  @test "returns NULL columns as None"
+  fn test_null_column -> Result<Bool, String>
+    conn =
+      match IntegrationTest.connect_trust()
+        Result.Ok(c) -> c
+        Result.Err(e) -> return Result.Err(e)
+      end
+
+    outcome = conn.query("SELECT NULL AS nothing")
+    _ = outcome.first.close()
+
+    result =
+      match outcome.second
+        Result.Ok(r) -> r
+        Result.Err(e) -> return Result.Err(e.message())
+      end
+
+    match IntegrationTest.cell(result, 0, 0)
+      Option.None -> Result.Ok(true)
+      Option.Some(value) -> Result.Err("expected NULL, got `#{value}`")
+    end
+  end
+
+  @test "runs DDL and DML with the right command tags"
+  fn test_ddl_and_dml_tags -> Result<Bool, String>
+    conn =
+      match IntegrationTest.connect_trust()
+        Result.Ok(c) -> c
+        Result.Err(e) -> return Result.Err(e)
+      end
+
+    created = conn.query("CREATE TEMP TABLE driver_test (id INT, label TEXT)")
+    conn = created.first
+
+    match IntegrationTest.expect_tag(created.second, "CREATE TABLE")
+      Result.Err(e) ->
+        _ = conn.close()
+        return Result.Err(e)
+
+      Result.Ok(_) ->
+        ()
+    end
+
+    inserted = conn.query(
+      "INSERT INTO driver_test VALUES (7, 'seven'), (8, NULL)",
+    )
+    conn = inserted.first
+
+    match IntegrationTest.expect_tag(inserted.second, "INSERT 0 2")
+      Result.Err(e) ->
+        _ = conn.close()
+        return Result.Err(e)
+
+      Result.Ok(_) ->
+        ()
+    end
+
+    selected = conn.query("SELECT label FROM driver_test ORDER BY id")
+    _ = selected.first.close()
+
+    result =
+      match selected.second
+        Result.Ok(r) -> r
+        Result.Err(e) -> return Result.Err(e.message())
+      end
+
+    unless result.rows.length() == 2
+      return Result.Err("expected 2 rows, got #{result.rows.length()}")
+    end
+
+    match IntegrationTest.cell(result, 0, 0)
+      Option.Some(value) ->
+        unless value == "seven"
+          return Result.Err("expected `seven`, got `#{value}`")
+        end
+
+      Option.None ->
+        return Result.Err("expected row 0 to be non-NULL")
+    end
+
+    match IntegrationTest.cell(result, 1, 0)
+      Option.None -> Result.Ok(true)
+      Option.Some(value) -> Result.Err("expected NULL, got `#{value}`")
+    end
+  end
+
+  @test "surfaces server errors with severity and SQLSTATE"
+  fn test_server_error -> Result<Bool, String>
+    conn =
+      match IntegrationTest.connect_trust()
+        Result.Ok(c) -> c
+        Result.Err(e) -> return Result.Err(e)
+      end
+
+    outcome = conn.query("SELEC 1")
+    _ = outcome.first.close()
+
+    match outcome.second
+      Result.Ok(_) ->
+        Result.Err("expected a syntax error, got a result")
+
+      Result.Err(Error.Server(server_error)) ->
+        unless server_error.code == "42601"
+          return Result.Err("expected SQLSTATE 42601, got #{server_error.code}")
+        end
+
+        server_error.severity == "ERROR"
+          ? Result.Ok(true)
+          : Result.Err("expected severity ERROR, got #{server_error.severity}")
+
+      Result.Err(e) ->
+        Result.Err("expected Error.Server, got: " <> e.message())
+    end
+  end
+
+  priv fn connect_trust -> Result<Connection, String>
+    config = Config.new(TEST_HOST, TEST_PORT, "koja_trust", TEST_DATABASE)
+
+    match Connection.connect(config)
+      Result.Ok(conn) ->
+        Result.Ok(conn)
+
+      Result.Err(e) ->
+        Result.Err("connect failed (is docker compose up?): " <> e.message())
+    end
+  end
+
+  priv fn cell(result: QueryResult, row: Int, column: Int) -> Option<String>
+    match result.rows.get(row)
+      Option.Some(columns) ->
+        match columns.get(column)
+          Option.Some(value) -> value
+          Option.None -> Option.None
+        end
+
+      Option.None ->
+        Option.None
+    end
+  end
+
+  priv fn expect_tag(outcome: Result<QueryResult, Error>, want: String)
+    -> Result<Bool, String>
+
+    match outcome
+      Result.Ok(result) ->
+        result.tag == want
+          ? Result.Ok(true)
+          : Result.Err("expected tag `#{want}`, got `#{result.tag}`")
+
+      Result.Err(e) ->
+        Result.Err(e.message())
+    end
+  end
+end

@@ -1,0 +1,223 @@
+# Postgres v3 wire-protocol message encoding and decoding.
+#
+# Encoding builds frames with binary literals and `<>` concatenation;
+# decoding strips the 5-byte header and walks the body with the cursor
+# helpers in `Wire`. Only the message types the driver needs are
+# modeled; everything else decodes to `Backend.Other`.
+priv const NULL_VALUE: Int = 4294967295
+priv const PROTOCOL_VERSION: Int = 196608
+
+priv enum Backend
+  AuthenticationOk
+  AuthenticationOther(Int)
+  BackendKeyData
+  CommandComplete(String)
+  DataRow(List<Option<String>>)
+  ErrorResponse(ServerError)
+  Other
+  ParameterStatus
+  ReadyForQuery
+  RowDescription(List<String>)
+end
+
+priv struct Message
+  fn encode_startup(user: String, database: String) -> Binary
+    # Builds a StartupMessage announcing the user and database. It
+    # carries no leading type byte, only a length prefix.
+
+    params = Message.cstring("user") <> Message.cstring(user) <>
+      Message.cstring("database") <>
+      Message.cstring(database) <>
+      <<0::8>>
+
+    body = <<PROTOCOL_VERSION::32>> <> params
+    <<(body.byte_size() + 4)::32>> <> body
+  end
+
+  fn encode_query(sql: String) -> Binary
+    # Builds a simple Query (`Q`) message wrapping the given SQL text.
+
+    payload = Message.cstring(sql)
+    <<0x51::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
+  end
+
+  fn encode_terminate -> Binary
+    # Builds a Terminate (`X`) message announcing a clean shutdown.
+
+    <<0x58::8>> <> <<4::32>>
+  end
+
+  fn decode(message: Binary) -> Backend
+    # Decodes one framed backend message (header included) into a
+    # `Backend` value.
+
+    match message
+      <<tag::8, _len::32, body: Binary>> -> Message.dispatch(tag, body)
+      _ -> Backend.Other
+    end
+  end
+
+  priv fn dispatch(tag: Int, body: Binary) -> Backend
+    match tag
+      67 -> Message.decode_command_complete(body)
+      68 -> Message.decode_data_row(body)
+      69 -> Message.decode_error(body)
+      75 -> Backend.BackendKeyData
+      82 -> Message.decode_auth(body)
+      83 -> Backend.ParameterStatus
+      84 -> Message.decode_row_description(body)
+      90 -> Backend.ReadyForQuery
+      _ -> Backend.Other
+    end
+  end
+
+  priv fn decode_auth(body: Binary) -> Backend
+    match Wire.take_u32(body)
+      Option.Some(pair) ->
+        pair.first == 0
+          ? Backend.AuthenticationOk
+          : Backend.AuthenticationOther(pair.first)
+
+      Option.None ->
+        Backend.Other
+    end
+  end
+
+  priv fn decode_command_complete(body: Binary) -> Backend
+    match Wire.take_cstring(body)
+      Option.Some(pair) -> Backend.CommandComplete(pair.first)
+      Option.None -> Backend.CommandComplete("")
+    end
+  end
+
+  priv fn decode_error(body: Binary) -> Backend
+    empty = ServerError{code: "", message: "", severity: ""}
+    Backend.ErrorResponse(Message.scan_error(body, empty))
+  end
+
+  priv fn scan_error(body: Binary, acc: ServerError) -> ServerError
+    # Walks the ErrorResponse field list (one-byte field tag followed by
+    # a NUL-terminated value, terminated by a zero byte), keeping the
+    # severity (`S`), SQLSTATE code (`C`), and message (`M`) fields.
+
+    match body
+      <<0::8, _rest: Binary>> ->
+        acc
+
+      <<field::8, rest: Binary>> ->
+        match Wire.take_cstring(rest)
+          Option.Some(pair) ->
+            Message.scan_error(
+              pair.second,
+              Message.apply_error_field(acc, field, pair.first),
+            )
+
+          Option.None ->
+            acc
+        end
+
+      _ ->
+        acc
+    end
+  end
+
+  priv fn apply_error_field(acc: ServerError, field: Int, value: String)
+    -> ServerError
+
+    match field
+      67 ->
+        ServerError{code: value, message: acc.message, severity: acc.severity}
+
+      77 ->
+        ServerError{code: acc.code, message: value, severity: acc.severity}
+
+      83 ->
+        ServerError{code: acc.code, message: acc.message, severity: value}
+
+      _ ->
+        acc
+    end
+  end
+
+  priv fn decode_row_description(body: Binary) -> Backend
+    fields: List<String> = List.new()
+
+    match Wire.take_u16(body)
+      Option.Some(pair) ->
+        Backend.RowDescription(Message.read_fields(
+          pair.second,
+          pair.first,
+          fields,
+        ))
+
+      Option.None ->
+        Backend.RowDescription(fields)
+    end
+  end
+
+  priv fn read_fields(body: Binary, remaining: Int, acc: List<String>)
+    -> List<String>
+
+    if remaining <= 0
+      return acc
+    end
+
+    match Wire.take_cstring(body)
+      Option.Some(pair) ->
+        tail = Wire.split_at(pair.second, 18).second
+        Message.read_fields(tail, remaining - 1, acc.append(pair.first))
+
+      Option.None ->
+        acc
+    end
+  end
+
+  priv fn decode_data_row(body: Binary) -> Backend
+    columns: List<Option<String>> = List.new()
+
+    match Wire.take_u16(body)
+      Option.Some(pair) ->
+        Backend.DataRow(Message.read_columns(pair.second, pair.first, columns))
+
+      Option.None ->
+        Backend.DataRow(columns)
+    end
+  end
+
+  priv fn read_columns(body: Binary, remaining: Int, acc: List<Option<String>>)
+    -> List<Option<String>>
+
+    if remaining <= 0
+      return acc
+    end
+
+    match Wire.take_u32(body)
+      Option.Some(pair) ->
+        if pair.first == NULL_VALUE
+          return Message.read_columns(
+            pair.second,
+            remaining - 1,
+            acc.append(Option.None),
+          )
+        end
+
+        split = Wire.split_at(pair.second, pair.first)
+
+        Message.read_columns(
+          split.second,
+          remaining - 1,
+          acc.append(match split.first.to_string()
+              Result.Ok(s) -> Option.Some(s)
+              Result.Err(_) -> Option.None
+            end),
+        )
+
+      Option.None ->
+        acc
+    end
+  end
+
+  priv fn cstring(s: String) -> Binary
+    s.to_binary() <> <<0::8>>
+  end
+end

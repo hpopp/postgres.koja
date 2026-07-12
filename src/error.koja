@@ -1,0 +1,51 @@
+@doc """
+An error reported by the Postgres server, decoded from an
+ErrorResponse message.
+"""
+struct ServerError
+  code: String
+  message: String
+  severity: String
+end
+
+@doc """
+Everything that can go wrong while talking to a Postgres server, from
+TCP-level failures to errors the server reports itself.
+"""
+enum Error
+  AuthenticationFailed(String)
+  ConnectFailed(String)
+  ConnectionClosed
+  IO(String)
+  Protocol(String)
+  Server(ServerError)
+  UnsupportedAuthentication(String)
+
+  @doc """
+  Returns a human-readable description of the error.
+  """
+  fn message(self) -> String
+    match self
+      Error.AuthenticationFailed(detail) ->
+        "authentication failed: " <> detail
+
+      Error.ConnectFailed(detail) ->
+        "connect failed: " <> detail
+
+      Error.ConnectionClosed ->
+        "connection closed by server"
+
+      Error.IO(detail) ->
+        "io error: " <> detail
+
+      Error.Protocol(detail) ->
+        "protocol error: " <> detail
+
+      Error.Server(server_error) ->
+        "#{server_error.severity} #{server_error.code}: #{server_error.message}"
+
+      Error.UnsupportedAuthentication(method) ->
+        "unsupported authentication method: " <> method
+    end
+  end
+end

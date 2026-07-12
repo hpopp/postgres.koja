@@ -1,0 +1,216 @@
+alias Net.TCPSocket
+
+@doc """
+A live Postgres connection speaking the v3 simple-query protocol.
+
+The connection owns its TCP socket and a read buffer holding any bytes
+received past the last consumed message. Because Koja values are
+independent, `query` returns an updated connection alongside its
+result; callers rebind to the returned connection.
+"""
+struct Connection
+  buffer: Binary
+  socket: TCPSocket
+
+  @doc """
+  Opens a connection, performs the startup handshake, and waits for
+  the server to report it is ready for queries. Only trust
+  authentication is supported; other methods fail with
+  `Error.UnsupportedAuthentication`.
+  """
+  fn connect(config: Config) -> Result<Connection, Error>
+    socket =
+      match TCPSocket.connect(config.host, config.port)
+        Result.Ok(s) -> s
+        Result.Err(e) -> return Result.Err(Error.ConnectFailed(e.message()))
+      end
+
+    startup = Message.encode_startup(config.user, config.database)
+
+    match Wire.write_all(socket, startup)
+      Result.Err(e) -> return Result.Err(e)
+      Result.Ok(_) -> ()
+    end
+
+    buffer: Binary = <<>>
+
+    match Connection.await_ready(socket, buffer)
+      Result.Ok(leftover) ->
+        Result.Ok(Connection{buffer: leftover, socket: socket})
+
+      Result.Err(e) ->
+        Result.Err(e)
+    end
+  end
+
+  @doc """
+  Runs a single SQL statement and collects its result set. Returns the
+  updated connection paired with the query outcome.
+  """
+  fn query(self, sql: String) -> Pair<Connection, Result<QueryResult, Error>>
+    match Wire.write_all(self.socket, Message.encode_query(sql))
+      Result.Err(e) -> return Pair.new(self, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
+
+    outcome = Connection.collect(self.socket, self.buffer, QueryState.empty())
+    Pair.new(
+      Connection{buffer: outcome.first, socket: self.socket},
+      outcome.second,
+    )
+  end
+
+  @doc """
+  Sends a Terminate message (best effort) and closes the socket.
+  """
+  fn close(self) -> Result<Bool, Error>
+    _ = Wire.write_all(self.socket, Message.encode_terminate())
+
+    match self.socket.close()
+      Result.Ok(_) -> Result.Ok(true)
+      Result.Err(e) -> Result.Err(Error.IO(e.message()))
+    end
+  end
+
+  priv fn await_ready(socket: TCPSocket, buffer: Binary)
+    -> Result<Binary, Error>
+
+    pair =
+      match Wire.read_message(socket, buffer)
+        Result.Ok(p) -> p
+        Result.Err(e) -> return Result.Err(e)
+      end
+
+    match Message.decode(pair.first)
+      Backend.ReadyForQuery ->
+        Result.Ok(pair.second)
+
+      Backend.ErrorResponse(server_error) ->
+        Result.Err(Error.Server(server_error))
+
+      Backend.AuthenticationOther(kind) ->
+        Result.Err(Error.UnsupportedAuthentication(Connection.auth_method_name(
+          kind,
+        )))
+
+      _ ->
+        Connection.await_ready(socket, pair.second)
+    end
+  end
+
+  priv fn collect(socket: TCPSocket, buffer: Binary, state: QueryState)
+    -> Pair<Binary, Result<QueryResult, Error>>
+
+    pair =
+      match Wire.read_message(socket, buffer)
+        Result.Ok(p) -> p
+        Result.Err(e) -> return Pair.new(buffer, Result.Err(e))
+      end
+
+    leftover = pair.second
+
+    match Message.decode(pair.first)
+      Backend.ReadyForQuery ->
+        Pair.new(leftover, state.finish())
+
+      Backend.RowDescription(fields) ->
+        Connection.collect(socket, leftover, state.with_fields(fields))
+
+      Backend.DataRow(columns) ->
+        Connection.collect(socket, leftover, state.add_row(columns))
+
+      Backend.CommandComplete(tag) ->
+        Connection.collect(socket, leftover, state.with_tag(tag))
+
+      Backend.ErrorResponse(server_error) ->
+        Connection.collect(socket, leftover, state.with_error(server_error))
+
+      _ ->
+        Connection.collect(socket, leftover, state)
+    end
+  end
+
+  priv fn auth_method_name(kind: Int) -> String
+    match kind
+      3 -> "cleartext password"
+      5 -> "md5"
+      10 -> "sasl"
+      _ -> "authentication code #{kind}"
+    end
+  end
+end
+
+@doc """
+The result of a successful query: column names, the rows (each a list
+of nullable text values), and the command tag (e.g. "INSERT 0 1").
+"""
+struct QueryResult
+  fields: List<String>
+  rows: List<List<Option<String>>>
+  tag: String
+end
+
+# Accumulator threaded through the read loop while a query's response
+# stream is consumed.
+priv struct QueryState
+  error: Option<ServerError>
+  fields: List<String>
+  rows: List<List<Option<String>>>
+  tag: String
+
+  fn empty -> QueryState
+    fields: List<String> = List.new()
+    rows: List<List<Option<String>>> = List.new()
+    QueryState{error: Option.None, fields: fields, rows: rows, tag: ""}
+  end
+
+  fn add_row(self, columns: List<Option<String>>) -> QueryState
+    QueryState{
+      error: self.error,
+      fields: self.fields,
+      rows: self.rows.append(columns),
+      tag: self.tag,
+    }
+  end
+
+  fn with_error(self, server_error: ServerError) -> QueryState
+    QueryState{
+      error: Option.Some(server_error),
+      fields: self.fields,
+      rows: self.rows,
+      tag: self.tag,
+    }
+  end
+
+  fn with_fields(self, fields: List<String>) -> QueryState
+    QueryState{
+      error: self.error,
+      fields: fields,
+      rows: self.rows,
+      tag: self.tag,
+    }
+  end
+
+  fn with_tag(self, tag: String) -> QueryState
+    QueryState{
+      error: self.error,
+      fields: self.fields,
+      rows: self.rows,
+      tag: tag,
+    }
+  end
+
+  fn finish(self) -> Result<QueryResult, Error>
+    match self.error
+      Option.Some(server_error) ->
+        Result.Err(Error.Server(server_error))
+
+      Option.None ->
+        Result.Ok(QueryResult{
+          fields: self.fields,
+          rows: self.rows,
+          tag: self.tag,
+        })
+    end
+  end
+end
