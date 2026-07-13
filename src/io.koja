@@ -14,7 +14,7 @@ priv struct Wire
   # Writes every byte of `data` to the socket, looping until the whole
   # buffer is flushed. Returns the number of bytes written.
   fn write_all(socket: TCPSocket, data: Binary) -> Result<Int, Error>
-    Wire.write_from(socket, data, 0)
+    write_from(socket, data, 0)
   end
 
   # Reads one complete backend message from `socket`. `buffer` carries
@@ -25,7 +25,7 @@ priv struct Wire
     -> Result<Pair<Binary, Binary>, Error>
 
     buffer =
-      match Wire.fill(socket, buffer, 5)
+      match fill(socket, buffer, 5)
         Result.Ok(b) -> b
         Result.Err(e) -> return Result.Err(e)
       end
@@ -39,12 +39,12 @@ priv struct Wire
     total = body_len + 1
 
     buffer =
-      match Wire.fill(socket, buffer, total)
+      match fill(socket, buffer, total)
         Result.Ok(b) -> b
         Result.Err(e) -> return Result.Err(e)
       end
 
-    Result.Ok(Wire.split_at(buffer, total))
+    Result.Ok(split_at(buffer, total))
   end
 
   # Splits `data` into the first `n` bytes and the remainder, clamping
@@ -78,7 +78,7 @@ priv struct Wire
   # Reads a NUL-terminated string off the front of `data`, returning
   # the decoded text and the bytes after the terminator.
   fn take_cstring(data: Binary) -> Option<Pair<String, Binary>>
-    Wire.scan_cstring(data, <<>>)
+    scan_cstring(data, <<>>)
   end
 
   # Returns the byte at `index`, or 0 out of bounds.
@@ -100,7 +100,7 @@ priv struct Wire
         end
 
       <<b::8, rest: Binary>> ->
-        Wire.scan_cstring(rest, acc <> <<b::8>>)
+        scan_cstring(rest, acc <> <<b::8>>)
 
       _ ->
         Option.None
@@ -117,20 +117,20 @@ priv struct Wire
     chunk =
       match socket.read_binary(8192)
         Result.Ok(c) -> c
-        Result.Err(e) -> return Result.Err(Error.IO(Wire.net_message(e)))
+        Result.Err(e) -> return Result.Err(Error.IO(net_message(e)))
       end
 
     if chunk.byte_size() == 0
       return Result.Err(Error.ConnectionClosed)
     end
 
-    Wire.fill(socket, buffer <> chunk, needed)
+    fill(socket, buffer <> chunk, needed)
   end
 
   priv fn write_from(socket: TCPSocket, data: Binary, offset: Int)
     -> Result<Int, Error>
 
-    remaining = Wire.split_at(data, offset).second
+    remaining = split_at(data, offset).second
 
     if remaining.byte_size() == 0
       return Result.Ok(offset)
@@ -139,10 +139,10 @@ priv struct Wire
     written =
       match socket.write(remaining)
         Result.Ok(n) -> n
-        Result.Err(e) -> return Result.Err(Error.IO(Wire.net_message(e)))
+        Result.Err(e) -> return Result.Err(Error.IO(net_message(e)))
       end
 
-    Wire.write_from(socket, data, offset + written)
+    write_from(socket, data, offset + written)
   end
 
   priv fn net_message(e: SocketError | TLSError) -> String

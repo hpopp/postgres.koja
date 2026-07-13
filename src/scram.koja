@@ -41,7 +41,7 @@ priv struct Scram
 
   # The full client-first-message including the gs2 header.
   fn first_message(username: String, nonce: String) -> String
-    "n,," <> Scram.first_bare(username, nonce)
+    "n,," <> first_bare(username, nonce)
   end
 
   # Computes the client-final-message and the expected server
@@ -54,7 +54,7 @@ priv struct Scram
   ) -> Result<ScramProof, String>
 
     parsed =
-      match Scram.parse_server_first(server_first)
+      match parse_server_first(server_first)
         Result.Ok(p) -> p
         Result.Err(e) -> return Result.Err(e)
       end
@@ -63,18 +63,16 @@ priv struct Scram
       return Result.Err("server nonce does not extend the client nonce")
     end
 
-    salted = Scram.hi(password.to_binary(), parsed.salt, parsed.iterations)
+    salted = hi(password.to_binary(), parsed.salt, parsed.iterations)
     client_key = HMAC.sha256(salted, "Client Key".to_binary())
     stored_key = SHA256.digest(client_key)
 
     without_proof = "c=" <> SCRAM_GS2_B64 <> ",r=" <> parsed.nonce
-    auth_message = Scram.first_bare(username, client_nonce) <> "," <>
-      server_first <>
-      "," <>
-      without_proof
+    auth_message = first_bare(username, client_nonce) <> "," <> server_first <>
+      "," <> without_proof
 
     client_signature = HMAC.sha256(stored_key, auth_message.to_binary())
-    client_proof = Scram.xor_bytes(client_key, client_signature)
+    client_proof = xor_bytes(client_key, client_signature)
 
     server_key = HMAC.sha256(salted, "Server Key".to_binary())
     server_signature = HMAC.sha256(server_key, auth_message.to_binary())
@@ -112,15 +110,15 @@ priv struct Scram
 
     for part in server_first.split(",")
       if part.starts_with?("r=")
-        nonce = Scram.attribute_value(part)
+        nonce = attribute_value(part)
       end
 
       if part.starts_with?("s=")
-        salt_b64 = Scram.attribute_value(part)
+        salt_b64 = attribute_value(part)
       end
 
       if part.starts_with?("i=")
-        iterations_text = Scram.attribute_value(part)
+        iterations_text = attribute_value(part)
       end
     end
 
@@ -161,7 +159,7 @@ priv struct Scram
 
     while round < iterations
       u = HMAC.sha256(password, u)
-      acc = Scram.xor_bytes(acc, u)
+      acc = xor_bytes(acc, u)
       round += 1
     end
 

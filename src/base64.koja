@@ -12,24 +12,21 @@ priv struct Base64
     i = 0
 
     while i + 3 <= size
-      n = Base64.combine(data, i, 3)
-      out = out <> Base64.char(n.bsr(18)) <> Base64.char(n.bsr(12).band(63)) <>
-        Base64.char(n.bsr(6).band(63)) <>
-        Base64.char(n.band(63))
+      n = combine(data, i, 3)
+      out = out <> char(n.bsr(18)) <> char(n.bsr(12).band(63)) <>
+        char(n.bsr(6).band(63)) <> char(n.band(63))
       i += 3
     end
 
     match size - i
       1 ->
-        tail1 = Base64.combine(data, i, 1)
-        out <> Base64.char(tail1.bsr(18)) <> Base64.char(tail1.bsr(12).band(63)) <>
-          "=="
+        n = combine(data, i, 1)
+        out <> char(n.bsr(18)) <> char(n.bsr(12).band(63)) <> "=="
 
       2 ->
-        tail2 = Base64.combine(data, i, 2)
-        out <> Base64.char(tail2.bsr(18)) <> Base64.char(tail2.bsr(12).band(63)) <>
-          Base64.char(tail2.bsr(6).band(63)) <>
-          "="
+        n = combine(data, i, 2)
+        out <> char(n.bsr(18)) <> char(n.bsr(12).band(63)) <>
+          char(n.bsr(6).band(63)) <> "="
 
       _ ->
         out
@@ -48,11 +45,11 @@ priv struct Base64
       end
 
       chunk =
-        match Base64.decode_quad(
-          Base64.sextet(Wire.byte_at(data, i)),
-          Base64.sextet(Wire.byte_at(data, i + 1)),
-          Base64.sextet(Wire.byte_at(data, i + 2)),
-          Base64.sextet(Wire.byte_at(data, i + 3)),
+        match decode_quad(
+          sextet(Wire.byte_at(data, i)),
+          sextet(Wire.byte_at(data, i + 1)),
+          sextet(Wire.byte_at(data, i + 2)),
+          sextet(Wire.byte_at(data, i + 3)),
           i + 4 == size,
         )
           Result.Ok(c) -> c
@@ -96,7 +93,7 @@ priv struct Base64
         return Result.Err("invalid base64 padding")
       end
 
-      return Result.Ok(<<(n.bsr(16))::8>> <> <<(n.bsr(8).band(255))::8>>)
+      return Result.Ok(<<(n.bsr(16))::8, (n.bsr(8).band(255))::8>>)
     end
 
     if s3 == BASE64_INVALID
@@ -105,8 +102,7 @@ priv struct Base64
 
     n = n.bor(s3)
 
-    Result.Ok(<<(n.bsr(16))::8>> <> <<(n.bsr(8).band(255))::8>> <>
-      <<(n.band(255))::8>>)
+    Result.Ok(<<(n.bsr(16))::8, (n.bsr(8).band(255))::8, (n.band(255))::8>>)
   end
 
   priv fn sextet(byte: Int) -> Int

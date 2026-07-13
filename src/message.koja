@@ -1,11 +1,23 @@
 # Postgres v3 wire-protocol message encoding and decoding.
 #
-# Encoding builds frames with binary literals and `<>` concatenation;
-# decoding strips the 5-byte header and walks the body with the cursor
-# helpers in `Wire`. Only the message types the driver needs are
-# modeled; everything else decodes to `Backend.Other`.
+# Encoding builds frames with binary literals and `<>` concatenation,
+# and decoding strips the 5-byte header and walks the body with the
+# cursor helpers in `Wire`. Only the message types the driver needs
+# are modeled. Everything else decodes to `Backend.Other`.
+
+# A Describe (`D`) frame for the unnamed portal (a `P` selector and
+# an empty portal name), so the server sends RowDescription (or
+# NoData) before the rows.
+priv const DESCRIBE_PORTAL: Binary = <<0x44::8, 6::32, 0x50::8, 0::8>>
+# An Execute (`E`) frame running the unnamed portal (empty name)
+# with no row limit.
+priv const EXECUTE: Binary = <<0x45::8, 9::32, 0::8, 0::32>>
 priv const NULL_VALUE: Int = 4294967295
 priv const PROTOCOL_VERSION: Int = 196608
+# A Sync (`S`) frame closing the extended-protocol cycle.
+priv const SYNC: Binary = <<0x53::8, 4::32>>
+# A Terminate (`X`) frame announcing a clean shutdown.
+priv const TERMINATE: Binary = <<0x58::8, 4::32>>
 
 priv enum Backend
   AuthenticationCleartextPassword
@@ -34,10 +46,8 @@ priv struct Message
   # Builds a StartupMessage announcing the user and database. It
   # carries no leading type byte, only a length prefix.
   fn encode_startup(user: String, database: String) -> Binary
-    params = Message.cstring("user") <> Message.cstring(user) <>
-      Message.cstring("database") <>
-      Message.cstring(database) <>
-      <<0::8>>
+    params = cstring("user") <> cstring(user) <> cstring("database") <>
+      cstring(database) <> <<0::8>>
 
     body = <<PROTOCOL_VERSION::32>> <> params
     <<(body.byte_size() + 4)::32>> <> body
@@ -45,72 +55,46 @@ priv struct Message
 
   # Builds a simple Query (`Q`) message wrapping the given SQL text.
   fn encode_query(sql: String) -> Binary
-    payload = Message.cstring(sql)
-    <<0x51::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
-  end
-
-  # Builds a Terminate (`X`) message announcing a clean shutdown.
-  fn encode_terminate -> Binary
-    <<0x58::8>> <> <<4::32>>
+    payload = cstring(sql)
+    <<0x51::8, (payload.byte_size() + 4)::32>> <> payload
   end
 
   # Builds a PasswordMessage (`p`) carrying a cleartext password.
   fn encode_password(password: String) -> Binary
-    payload = Message.cstring(password)
-    <<0x70::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
+    payload = cstring(password)
+    <<0x70::8, (payload.byte_size() + 4)::32>> <> payload
   end
 
-  # Builds a SASLInitialResponse (`p`): mechanism name plus the
-  # length-prefixed client-first-message.
+  # Builds a SASLInitialResponse (`p`) carrying the mechanism name
+  # plus the length-prefixed client-first-message.
   fn encode_sasl_initial(mechanism: String, response: String) -> Binary
     response_bytes = response.to_binary()
-    payload = Message.cstring(mechanism) <> <<(response_bytes.byte_size())::32>> <>
+    payload = cstring(mechanism) <> <<(response_bytes.byte_size())::32>> <>
       response_bytes
 
-    <<0x70::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
+    <<0x70::8, (payload.byte_size() + 4)::32>> <> payload
   end
 
   # Builds a SASLResponse (`p`) carrying the raw client-final-message.
   fn encode_sasl_response(response: String) -> Binary
     payload = response.to_binary()
-    <<0x70::8>> <> <<(payload.byte_size() + 4)::32>> <> payload
+    <<0x70::8, (payload.byte_size() + 4)::32>> <> payload
   end
 
   # Builds a Parse (`P`) message for the unnamed prepared statement
   # with no pre-declared parameter types (the server infers them).
   fn encode_parse(sql: String) -> Binary
-    body = Message.cstring("") <> Message.cstring(sql) <> <<0::16>>
-    <<0x50::8>> <> <<(body.byte_size() + 4)::32>> <> body
+    body = cstring("") <> cstring(sql) <> <<0::16>>
+    <<0x50::8, (body.byte_size() + 4)::32>> <> body
   end
 
   # Builds a Bind (`B`) message binding text-format parameters to
   # the unnamed statement and portal, with text-format results.
   fn encode_bind(params: List<Option<String>>) -> Binary
-    body = Message.cstring("") <> Message.cstring("") <> <<0::16>> <>
-      <<(params.length())::16>> <>
-      Message.encode_bind_parameters(params) <>
-      <<0::16>>
+    body = cstring("") <> cstring("") <> <<0::16, (params.length())::16>> <>
+      encode_bind_parameters(params) <> <<0::16>>
 
-    <<0x42::8>> <> <<(body.byte_size() + 4)::32>> <> body
-  end
-
-  # Builds a Describe (`D`) message for the unnamed portal, so the
-  # server sends RowDescription (or NoData) before the rows.
-  fn encode_describe_portal -> Binary
-    body = <<0x50::8>> <> Message.cstring("")
-    <<0x44::8>> <> <<(body.byte_size() + 4)::32>> <> body
-  end
-
-  # Builds an Execute (`E`) message running the unnamed portal with
-  # no row limit.
-  fn encode_execute -> Binary
-    body = Message.cstring("") <> <<0::32>>
-    <<0x45::8>> <> <<(body.byte_size() + 4)::32>> <> body
-  end
-
-  # Builds a Sync (`S`) message closing the extended-protocol cycle.
-  fn encode_sync -> Binary
-    <<0x53::8>> <> <<4::32>>
+    <<0x42::8, (body.byte_size() + 4)::32>> <> body
   end
 
   priv fn encode_bind_parameters(params: List<Option<String>>) -> Binary
@@ -134,7 +118,7 @@ priv struct Message
   # `Backend` value.
   fn decode(message: Binary) -> Backend
     match message
-      <<tag::8, _len::32, body: Binary>> -> Message.dispatch(tag, body)
+      <<tag::8, _len::32, body: Binary>> -> dispatch(tag, body)
       _ -> Backend.Other
     end
   end
@@ -143,14 +127,14 @@ priv struct Message
     match tag
       49 -> Backend.ParseComplete
       50 -> Backend.BindComplete
-      67 -> Message.decode_command_complete(body)
-      68 -> Message.decode_data_row(body)
-      69 -> Message.decode_error(body)
+      67 -> decode_command_complete(body)
+      68 -> decode_data_row(body)
+      69 -> decode_error(body)
       73 -> Backend.EmptyQueryResponse
       75 -> Backend.BackendKeyData
-      82 -> Message.decode_auth(body)
+      82 -> decode_auth(body)
       83 -> Backend.ParameterStatus
-      84 -> Message.decode_row_description(body)
+      84 -> decode_row_description(body)
       90 -> Backend.ReadyForQuery
       110 -> Backend.NoData
       115 -> Backend.PortalSuspended
@@ -161,7 +145,7 @@ priv struct Message
 
   priv fn decode_auth(body: Binary) -> Backend
     match Wire.take_u32(body)
-      Option.Some(pair) -> Message.auth_request(pair.first, pair.second)
+      Option.Some(pair) -> auth_request(pair.first, pair.second)
       Option.None -> Backend.Other
     end
   end
@@ -170,15 +154,15 @@ priv struct Message
     match code
       0 -> Backend.AuthenticationOk
       3 -> Backend.AuthenticationCleartextPassword
-      10 -> Message.decode_sasl_mechanisms(rest)
-      11 -> Message.sasl_payload(rest, true)
-      12 -> Message.sasl_payload(rest, false)
+      10 -> decode_sasl_mechanisms(rest)
+      11 -> sasl_payload(rest, true)
+      12 -> sasl_payload(rest, false)
       _ -> Backend.AuthenticationOther(code)
     end
   end
 
-  # The AuthenticationSASL body: NUL-terminated mechanism names ended
-  # by an empty string.
+  # The AuthenticationSASL body is a list of NUL-terminated mechanism
+  # names ended by an empty string.
   priv fn decode_sasl_mechanisms(body: Binary) -> Backend
     mechanisms: List<String> = List.new()
     rest = body
@@ -220,7 +204,7 @@ priv struct Message
 
   priv fn decode_error(body: Binary) -> Backend
     empty = ServerError{code: "", message: "", severity: ""}
-    Backend.ErrorResponse(Message.scan_error(body, empty))
+    Backend.ErrorResponse(scan_error(body, empty))
   end
 
   # Walks the ErrorResponse field list (one-byte field tag followed by
@@ -234,10 +218,7 @@ priv struct Message
       <<field::8, rest: Binary>> ->
         match Wire.take_cstring(rest)
           Option.Some(pair) ->
-            Message.scan_error(
-              pair.second,
-              Message.apply_error_field(acc, field, pair.first),
-            )
+            scan_error(pair.second, apply_error_field(acc, field, pair.first))
 
           Option.None ->
             acc
@@ -253,13 +234,16 @@ priv struct Message
 
     match field
       67 ->
-        ServerError{code: value, message: acc.message, severity: acc.severity}
+        acc.code = value
+        acc
 
       77 ->
-        ServerError{code: acc.code, message: value, severity: acc.severity}
+        acc.message = value
+        acc
 
       83 ->
-        ServerError{code: acc.code, message: acc.message, severity: value}
+        acc.severity = value
+        acc
 
       _ ->
         acc
@@ -271,11 +255,7 @@ priv struct Message
 
     match Wire.take_u16(body)
       Option.Some(pair) ->
-        Backend.RowDescription(Message.read_fields(
-          pair.second,
-          pair.first,
-          fields,
-        ))
+        Backend.RowDescription(read_fields(pair.second, pair.first, fields))
 
       Option.None ->
         Backend.RowDescription(fields)
@@ -292,7 +272,7 @@ priv struct Message
     match Wire.take_cstring(body)
       Option.Some(pair) ->
         tail = Wire.split_at(pair.second, 18).second
-        Message.read_fields(tail, remaining - 1, acc.append(pair.first))
+        read_fields(tail, remaining - 1, acc.append(pair.first))
 
       Option.None ->
         acc
@@ -304,7 +284,7 @@ priv struct Message
 
     match Wire.take_u16(body)
       Option.Some(pair) ->
-        Backend.DataRow(Message.read_columns(pair.second, pair.first, columns))
+        Backend.DataRow(read_columns(pair.second, pair.first, columns))
 
       Option.None ->
         Backend.DataRow(columns)
@@ -321,7 +301,7 @@ priv struct Message
     match Wire.take_u32(body)
       Option.Some(pair) ->
         if pair.first == NULL_VALUE
-          return Message.read_columns(
+          return read_columns(
             pair.second,
             remaining - 1,
             acc.append(Option.None),
@@ -330,13 +310,10 @@ priv struct Message
 
         split = Wire.split_at(pair.second, pair.first)
 
-        Message.read_columns(
+        read_columns(
           split.second,
           remaining - 1,
-          acc.append(match split.first.to_string()
-              Result.Ok(s) -> Option.Some(s)
-              Result.Err(_) -> Option.None
-            end),
+          acc.append(split.first.to_string().ok()),
         )
 
       Option.None ->

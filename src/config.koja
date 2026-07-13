@@ -26,12 +26,7 @@ struct Config
   Returns the config with the given password set.
   """
   fn with_password(self, password: String) -> Config
-    Config{
-      database: self.database,
-      host: self.host,
-      password: Option.Some(password),
-      port: self.port,
-      user: self.user,
-    }
+    self.password = Option.Some(password)
+    self
   end
 end

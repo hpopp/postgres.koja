@@ -33,7 +33,7 @@ struct Connection
 
     buffer: Binary = <<>>
 
-    match Connection.handshake(socket, buffer, config)
+    match handshake(socket, buffer, config)
       Result.Ok(leftover) ->
         Result.Ok(Connection{buffer: leftover, socket: socket})
 
@@ -52,7 +52,7 @@ struct Connection
       Result.Ok(_) -> ()
     end
 
-    outcome = Connection.collect(self.socket, self.buffer, QueryState.empty())
+    outcome = collect(self.socket, self.buffer, QueryState.empty())
     Pair.new(
       Connection{buffer: outcome.first, socket: self.socket},
       outcome.second,
@@ -69,16 +69,14 @@ struct Connection
     -> Pair<Connection, Result<QueryResult, Error>>
 
     payload = Message.encode_parse(sql) <> Message.encode_bind(params) <>
-      Message.encode_describe_portal() <>
-      Message.encode_execute() <>
-      Message.encode_sync()
+      DESCRIBE_PORTAL <> EXECUTE <> SYNC
 
     match Wire.write_all(self.socket, payload)
       Result.Err(e) -> return Pair.new(self, Result.Err(e))
       Result.Ok(_) -> ()
     end
 
-    outcome = Connection.collect(self.socket, self.buffer, QueryState.empty())
+    outcome = collect(self.socket, self.buffer, QueryState.empty())
     Pair.new(
       Connection{buffer: outcome.first, socket: self.socket},
       outcome.second,
@@ -88,11 +86,11 @@ struct Connection
   @doc """
   Sends a Terminate message (best effort) and closes the socket.
   """
-  fn close(self) -> Result<Bool, Error>
-    _ = Wire.write_all(self.socket, Message.encode_terminate())
+  fn close(self) -> Result<(), Error>
+    _ = Wire.write_all(self.socket, TERMINATE)
 
     match self.socket.close()
-      Result.Ok(_) -> Result.Ok(true)
+      Result.Ok(_) -> Result.Ok(())
       Result.Err(e) -> Result.Err(Error.IO(e.message()))
     end
   end
@@ -117,7 +115,7 @@ struct Connection
 
       Backend.AuthenticationCleartextPassword ->
         password =
-          match Connection.require_password(config)
+          match require_password(config)
             Result.Ok(p) -> p
             Result.Err(e) -> return Result.Err(e)
           end
@@ -127,29 +125,22 @@ struct Connection
           Result.Ok(_) -> ()
         end
 
-        Connection.handshake(socket, pair.second, config)
+        handshake(socket, pair.second, config)
 
       Backend.AuthenticationSASL(mechanisms) ->
         leftover =
-          match Connection.sasl_authenticate(
-            socket,
-            pair.second,
-            config,
-            mechanisms,
-          )
+          match sasl_authenticate(socket, pair.second, config, mechanisms)
             Result.Ok(l) -> l
             Result.Err(e) -> return Result.Err(e)
           end
 
-        Connection.handshake(socket, leftover, config)
+        handshake(socket, leftover, config)
 
       Backend.AuthenticationOther(kind) ->
-        Result.Err(Error.UnsupportedAuthentication(Connection.auth_method_name(
-          kind,
-        )))
+        Result.Err(Error.UnsupportedAuthentication(auth_method_name(kind)))
 
       _ ->
-        Connection.handshake(socket, pair.second, config)
+        handshake(socket, pair.second, config)
     end
   end
 
@@ -169,7 +160,7 @@ struct Connection
     end
 
     password =
-      match Connection.require_password(config)
+      match require_password(config)
         Result.Ok(p) -> p
         Result.Err(e) -> return Result.Err(e)
       end
@@ -186,7 +177,7 @@ struct Connection
     end
 
     continue_pair =
-      match Connection.read_auth_message(socket, buffer)
+      match read_auth_message(socket, buffer)
         Result.Ok(p) -> p
         Result.Err(e) -> return Result.Err(e)
       end
@@ -214,7 +205,7 @@ struct Connection
     end
 
     final_pair =
-      match Connection.read_auth_message(socket, continue_pair.second)
+      match read_auth_message(socket, continue_pair.second)
         Result.Ok(p) -> p
         Result.Err(e) -> return Result.Err(e)
       end
@@ -272,19 +263,19 @@ struct Connection
         Pair.new(leftover, state.finish())
 
       Backend.RowDescription(fields) ->
-        Connection.collect(socket, leftover, state.with_fields(fields))
+        collect(socket, leftover, state.with_fields(fields))
 
       Backend.DataRow(columns) ->
-        Connection.collect(socket, leftover, state.add_row(columns))
+        collect(socket, leftover, state.add_row(columns))
 
       Backend.CommandComplete(tag) ->
-        Connection.collect(socket, leftover, state.with_tag(tag))
+        collect(socket, leftover, state.with_tag(tag))
 
       Backend.ErrorResponse(server_error) ->
-        Connection.collect(socket, leftover, state.with_error(server_error))
+        collect(socket, leftover, state.with_error(server_error))
 
       _ ->
-        Connection.collect(socket, leftover, state)
+        collect(socket, leftover, state)
     end
   end
 
@@ -323,39 +314,23 @@ priv struct QueryState
   end
 
   fn add_row(self, columns: List<Option<String>>) -> QueryState
-    QueryState{
-      error: self.error,
-      fields: self.fields,
-      rows: self.rows.append(columns),
-      tag: self.tag,
-    }
+    self.rows = self.rows.append(columns)
+    self
   end
 
   fn with_error(self, server_error: ServerError) -> QueryState
-    QueryState{
-      error: Option.Some(server_error),
-      fields: self.fields,
-      rows: self.rows,
-      tag: self.tag,
-    }
+    self.error = Option.Some(server_error)
+    self
   end
 
   fn with_fields(self, fields: List<String>) -> QueryState
-    QueryState{
-      error: self.error,
-      fields: fields,
-      rows: self.rows,
-      tag: self.tag,
-    }
+    self.fields = fields
+    self
   end
 
   fn with_tag(self, tag: String) -> QueryState
-    QueryState{
-      error: self.error,
-      fields: self.fields,
-      rows: self.rows,
-      tag: tag,
-    }
+    self.tag = tag
+    self
   end
 
   fn finish(self) -> Result<QueryResult, Error>

@@ -71,7 +71,7 @@ struct Base64Test
 
   @test "round-trips arbitrary bytes including 0x00 and 0xFF"
   fn test_binary_round_trip -> Result<Bool, String>
-    original = <<0::8>> <> <<255::8>> <> <<128::8>> <> <<7::8>>
+    original = <<0::8, 255::8, 128::8, 7::8>>
     encoded = Base64.encode(original)
 
     unless encoded == "AP+ABw=="

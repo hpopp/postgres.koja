@@ -79,9 +79,9 @@ struct MessageTest
     end
   end
 
-  @test "encode_terminate is a bare X frame"
-  fn test_encode_terminate -> Result<Bool, String>
-    match Message.encode_terminate()
+  @test "TERMINATE is a bare X frame"
+  fn test_terminate -> Result<Bool, String>
+    match TERMINATE
       <<0x58::8, 4::32>> -> Result.Ok(true)
       _ -> Result.Err("expected <<X, 4>> frame")
     end
@@ -115,12 +115,9 @@ struct MessageTest
   @test "decode collects severity, code, and message from ErrorResponse"
   fn test_decode_error_response -> Result<Bool, String>
     body = <<83::8>> <> MessageTest.cstring("ERROR") <> <<86::8>> <>
-      MessageTest.cstring("ERROR") <>
-      <<67::8>> <>
-      MessageTest.cstring("42601") <>
-      <<77::8>> <>
-      MessageTest.cstring("syntax error at or near \"SELEC\"") <>
-      <<0::8>>
+      MessageTest.cstring("ERROR") <> <<67::8>> <>
+      MessageTest.cstring("42601") <> <<77::8>> <>
+      MessageTest.cstring("syntax error at or near \"SELEC\"") <> <<0::8>>
 
     match Message.decode(MessageTest.frame(69, body))
       Backend.ErrorResponse(server_error) ->
@@ -146,8 +143,7 @@ struct MessageTest
   @test "decode reads column names from RowDescription"
   fn test_decode_row_description -> Result<Bool, String>
     body = <<2::16>> <> MessageTest.cstring("id") <>
-      MessageTest.field_metadata() <>
-      MessageTest.cstring("name") <>
+      MessageTest.field_metadata() <> MessageTest.cstring("name") <>
       MessageTest.field_metadata()
 
     match Message.decode(MessageTest.frame(84, body))
@@ -170,7 +166,7 @@ struct MessageTest
 
   @test "decode reads text and NULL columns from DataRow"
   fn test_decode_data_row -> Result<Bool, String>
-    body = <<2::16>> <> <<5::32>> <> "hello".to_binary() <> <<4294967295::32>>
+    body = <<2::16, 5::32>> <> "hello".to_binary() <> <<4294967295::32>>
 
     match Message.decode(MessageTest.frame(68, body))
       Backend.DataRow(columns) ->
@@ -262,7 +258,9 @@ struct MessageTest
         # Body: portal "", statement "", 0 format codes, 2 params:
         # int32 2 + "42", int32 -1 (NULL), then 0 result formats.
         match body
-          <<0::8, 0::8, 0::16, 2::16, 2::32, 52::8, 50::8, 4294967295::32, 0::16>> ->
+          <<
+            0::8, 0::8, 0::16, 2::16, 2::32, 52::8, 50::8, 4294967295::32, 0::16
+          >> ->
             Result.Ok(true)
 
           _ ->
@@ -274,19 +272,19 @@ struct MessageTest
     end
   end
 
-  @test "encode_describe_portal, encode_execute, and encode_sync frame correctly"
-  fn test_encode_describe_execute_sync -> Result<Bool, String>
-    match Message.encode_describe_portal()
+  @test "DESCRIBE_PORTAL, EXECUTE, and SYNC frame correctly"
+  fn test_describe_execute_sync -> Result<Bool, String>
+    match DESCRIBE_PORTAL
       <<0x44::8, 6::32, 0x50::8, 0::8>> -> ()
       _ -> return Result.Err("unexpected Describe frame")
     end
 
-    match Message.encode_execute()
+    match EXECUTE
       <<0x45::8, 9::32, 0::8, 0::32>> -> ()
       _ -> return Result.Err("unexpected Execute frame")
     end
 
-    match Message.encode_sync()
+    match SYNC
       <<0x53::8, 4::32>> -> Result.Ok(true)
       _ -> Result.Err("unexpected Sync frame")
     end
@@ -334,19 +332,18 @@ struct MessageTest
   end
 
   priv fn frame(tag: Int, body: Binary) -> Binary
-    <<tag::8>> <> <<(body.byte_size() + 4)::32>> <> body
+    <<tag::8, (body.byte_size() + 4)::32>> <> body
   end
 
   priv fn cstring(s: String) -> Binary
     s.to_binary() <> <<0::8>>
   end
 
+  # The 18 bytes of per-field metadata (table oid, attribute number,
+  # type oid, type size, type modifier, format code) that follow each
+  # name in a RowDescription.
   priv fn field_metadata -> Binary
-    # The 18 bytes of per-field metadata (table oid, attribute number,
-    # type oid, type size, type modifier, format code) that follow each
-    # name in a RowDescription.
-
-    <<0::32>> <> <<0::32>> <> <<0::32>> <> <<0::32>> <> <<0::16>>
+    <<0::32, 0::32, 0::32, 0::32, 0::16>>
   end
 
   priv fn expect_string(actual: Option<String>, want: String)
