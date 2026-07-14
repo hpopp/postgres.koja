@@ -114,10 +114,11 @@ struct MessageTest
 
   @test "decode collects severity, code, and message from ErrorResponse"
   fn test_decode_error_response -> Result<Bool, String>
-    body = <<83::8>> <> MessageTest.cstring("ERROR") <> <<86::8>> <>
-      MessageTest.cstring("ERROR") <> <<67::8>> <>
-      MessageTest.cstring("42601") <> <<77::8>> <>
-      MessageTest.cstring("syntax error at or near \"SELEC\"") <> <<0::8>>
+    body = <<
+      83, MessageTest.cstring("ERROR"), 86, MessageTest.cstring("ERROR"), 67,
+      MessageTest.cstring("42601"), 77,
+      MessageTest.cstring("syntax error at or near \"SELEC\""), 0
+    >>
 
     match Message.decode(MessageTest.frame(69, body))
       Backend.ErrorResponse(server_error) ->
@@ -142,9 +143,10 @@ struct MessageTest
 
   @test "decode reads column names from RowDescription"
   fn test_decode_row_description -> Result<Bool, String>
-    body = <<2::16>> <> MessageTest.cstring("id") <>
-      MessageTest.field_metadata() <> MessageTest.cstring("name") <>
-      MessageTest.field_metadata()
+    body = <<
+      2::16, MessageTest.cstring("id"), MessageTest.field_metadata(),
+      MessageTest.cstring("name"), MessageTest.field_metadata()
+    >>
 
     match Message.decode(MessageTest.frame(84, body))
       Backend.RowDescription(fields) ->
@@ -166,7 +168,7 @@ struct MessageTest
 
   @test "decode reads text and NULL columns from DataRow"
   fn test_decode_data_row -> Result<Bool, String>
-    body = <<2::16, 5::32>> <> "hello".to_binary() <> <<4294967295::32>>
+    body = <<2::16, 5::32, "hello", 4294967295::32>>
 
     match Message.decode(MessageTest.frame(68, body))
       Backend.DataRow(columns) ->
@@ -332,11 +334,11 @@ struct MessageTest
   end
 
   priv fn frame(tag: Int, body: Binary) -> Binary
-    <<tag::8, (body.byte_size() + 4)::32>> <> body
+    <<tag, (body.byte_size() + 4)::32, body>>
   end
 
   priv fn cstring(s: String) -> Binary
-    s.to_binary() <> <<0::8>>
+    <<s.to_binary(), 0>>
   end
 
   # The 18 bytes of per-field metadata (table oid, attribute number,

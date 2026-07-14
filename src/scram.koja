@@ -153,7 +153,7 @@ priv struct Scram
   # Hi(str, salt, i) from RFC 5802: PBKDF2-HMAC-SHA-256 with one
   # output block.
   priv fn hi(password: Binary, salt: Binary, iterations: Int) -> Binary
-    u = HMAC.sha256(password, salt <> <<1::32>>)
+    u = HMAC.sha256(password, <<salt, 1::32>>)
     acc = u
     round = 1
 
@@ -173,7 +173,7 @@ priv struct Scram
     while i < a.byte_size()
       x = Wire.byte_at(a, i)
       y = Wire.byte_at(b, i)
-      out = out <> <<(x.bxor(y))::8>>
+      out = <<out, x.bxor(y)>>
       i += 1
     end
 

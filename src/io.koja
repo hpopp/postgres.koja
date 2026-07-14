@@ -100,7 +100,7 @@ priv struct Wire
         end
 
       <<b::8, rest: Binary>> ->
-        scan_cstring(rest, acc <> <<b::8>>)
+        scan_cstring(rest, <<acc, b>>)
 
       _ ->
         Option.None

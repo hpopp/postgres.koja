@@ -1,23 +1,24 @@
 # Postgres v3 wire-protocol message encoding and decoding.
 #
-# Encoding builds frames with binary literals and `<>` concatenation,
-# and decoding strips the 5-byte header and walks the body with the
-# cursor helpers in `Wire`. Only the message types the driver needs
-# are modeled. Everything else decodes to `Backend.Other`.
+# Encoding builds each frame as a single binary literal, splicing
+# computed payloads in. Decoding strips the 5-byte header and walks
+# the body with the cursor helpers in `Wire`. Only the message types
+# the driver needs are modeled. Everything else decodes to
+# `Backend.Other`.
 
 # A Describe (`D`) frame for the unnamed portal (a `P` selector and
 # an empty portal name), so the server sends RowDescription (or
 # NoData) before the rows.
-priv const DESCRIBE_PORTAL: Binary = <<0x44::8, 6::32, 0x50::8, 0::8>>
+priv const DESCRIBE_PORTAL: Binary = <<0x44, 6::32, 0x50, 0>>
 # An Execute (`E`) frame running the unnamed portal (empty name)
 # with no row limit.
-priv const EXECUTE: Binary = <<0x45::8, 9::32, 0::8, 0::32>>
+priv const EXECUTE: Binary = <<0x45, 9::32, 0, 0::32>>
 priv const NULL_VALUE: Int = 4294967295
 priv const PROTOCOL_VERSION: Int = 196608
 # A Sync (`S`) frame closing the extended-protocol cycle.
-priv const SYNC: Binary = <<0x53::8, 4::32>>
+priv const SYNC: Binary = <<0x53, 4::32>>
 # A Terminate (`X`) frame announcing a clean shutdown.
-priv const TERMINATE: Binary = <<0x58::8, 4::32>>
+priv const TERMINATE: Binary = <<0x58, 4::32>>
 
 priv enum Backend
   AuthenticationCleartextPassword
@@ -46,55 +47,59 @@ priv struct Message
   # Builds a StartupMessage announcing the user and database. It
   # carries no leading type byte, only a length prefix.
   fn encode_startup(user: String, database: String) -> Binary
-    params = cstring("user") <> cstring(user) <> cstring("database") <>
-      cstring(database) <> <<0::8>>
+    params = <<
+      cstring("user"), cstring(user), cstring("database"), cstring(database), 0
+    >>
 
-    body = <<PROTOCOL_VERSION::32>> <> params
-    <<(body.byte_size() + 4)::32>> <> body
+    body = <<PROTOCOL_VERSION::32, params>>
+    <<(body.byte_size() + 4)::32, body>>
   end
 
   # Builds a simple Query (`Q`) message wrapping the given SQL text.
   fn encode_query(sql: String) -> Binary
     payload = cstring(sql)
-    <<0x51::8, (payload.byte_size() + 4)::32>> <> payload
+    <<0x51, (payload.byte_size() + 4)::32, payload>>
   end
 
   # Builds a PasswordMessage (`p`) carrying a cleartext password.
   fn encode_password(password: String) -> Binary
     payload = cstring(password)
-    <<0x70::8, (payload.byte_size() + 4)::32>> <> payload
+    <<0x70, (payload.byte_size() + 4)::32, payload>>
   end
 
   # Builds a SASLInitialResponse (`p`) carrying the mechanism name
   # plus the length-prefixed client-first-message.
   fn encode_sasl_initial(mechanism: String, response: String) -> Binary
     response_bytes = response.to_binary()
-    payload = cstring(mechanism) <> <<(response_bytes.byte_size())::32>> <>
-      response_bytes
+    payload = <<
+      cstring(mechanism), response_bytes.byte_size()::32, response_bytes
+    >>
 
-    <<0x70::8, (payload.byte_size() + 4)::32>> <> payload
+    <<0x70, (payload.byte_size() + 4)::32, payload>>
   end
 
   # Builds a SASLResponse (`p`) carrying the raw client-final-message.
   fn encode_sasl_response(response: String) -> Binary
     payload = response.to_binary()
-    <<0x70::8, (payload.byte_size() + 4)::32>> <> payload
+    <<0x70, (payload.byte_size() + 4)::32, payload>>
   end
 
   # Builds a Parse (`P`) message for the unnamed prepared statement
   # with no pre-declared parameter types (the server infers them).
   fn encode_parse(sql: String) -> Binary
-    body = cstring("") <> cstring(sql) <> <<0::16>>
-    <<0x50::8, (body.byte_size() + 4)::32>> <> body
+    body = <<cstring(""), cstring(sql), 0::16>>
+    <<0x50, (body.byte_size() + 4)::32, body>>
   end
 
   # Builds a Bind (`B`) message binding text-format parameters to
   # the unnamed statement and portal, with text-format results.
   fn encode_bind(params: List<Option<String>>) -> Binary
-    body = cstring("") <> cstring("") <> <<0::16, (params.length())::16>> <>
-      encode_bind_parameters(params) <> <<0::16>>
+    body = <<
+      cstring(""), cstring(""), 0::16, (params.length())::16,
+      encode_bind_parameters(params), 0::16
+    >>
 
-    <<0x42::8, (body.byte_size() + 4)::32>> <> body
+    <<0x42, (body.byte_size() + 4)::32, body>>
   end
 
   priv fn encode_bind_parameters(params: List<Option<String>>) -> Binary
@@ -104,10 +109,10 @@ priv struct Message
       match param
         Option.Some(text) ->
           bytes = text.to_binary()
-          out = out <> <<(bytes.byte_size())::32>> <> bytes
+          out = <<out, bytes.byte_size()::32, bytes>>
 
         Option.None ->
-          out = out <> <<NULL_VALUE::32>>
+          out = <<out, NULL_VALUE::32>>
       end
     end
 
@@ -322,6 +327,6 @@ priv struct Message
   end
 
   priv fn cstring(s: String) -> Binary
-    s.to_binary() <> <<0::8>>
+    <<s.to_binary(), 0>>
   end
 end

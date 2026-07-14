@@ -102,4 +102,6 @@ provisions one user per auth path: `koja_trust` (trust), `koja_password`
 
 ## License
 
-MIT
+Copyright (c) 2026 Henry Popp
+
+This project is MIT licensed. See the [LICENSE](LICENSE) for details.
