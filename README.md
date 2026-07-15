@@ -1,5 +1,8 @@
 # Postgres
 
+[![CI](https://github.com/hpopp/postgres-koja/actions/workflows/ci.yml/badge.svg)](https://github.com/hpopp/postgres-koja/actions/workflows/ci.yml)
+[![Last Updated](https://img.shields.io/github/last-commit/hpopp/postgres-koja.svg)](https://github.com/hpopp/postgres-koja/commits/main)
+
 A PostgreSQL driver for [Koja](https://github.com/koja-lang/koja), speaking the
 v3 wire protocol over TCP. No C dependencies beyond the Koja stdlib.
 
