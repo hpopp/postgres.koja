@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  KOJA_VERSION: 0.15.0
+  KOJA_VERSION: 0.15.1
 
 jobs:
   prettier:
