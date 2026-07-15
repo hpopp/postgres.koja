@@ -30,10 +30,9 @@ struct MessageTest
 
     match expected.get(index)
       Option.None ->
-        match data
-          <<0::8>> -> Result.Ok(true)
-          _ -> Result.Err("startup params missing final terminator")
-        end
+        data == <<0>>
+          ? Result.Ok(true)
+          : Result.Err("startup params missing final terminator")
 
       Option.Some(want) ->
         match Wire.take_cstring(data)
@@ -81,10 +80,9 @@ struct MessageTest
 
   @test "TERMINATE is a bare X frame"
   fn test_terminate -> Result<Bool, String>
-    match TERMINATE
-      <<0x58::8, 4::32>> -> Result.Ok(true)
-      _ -> Result.Err("expected <<X, 4>> frame")
-    end
+    TERMINATE == <<0x58, 4::32>>
+      ? Result.Ok(true)
+      : Result.Err("expected <<X, 4>> frame, got #{TERMINATE}")
   end
 
   @test "decode recognizes ReadyForQuery"
@@ -232,10 +230,9 @@ struct MessageTest
           return Result.Err("expected `SELECT $1`, got `#{sql_pair.first}`")
         end
 
-        match sql_pair.second
-          <<0::16>> -> Result.Ok(true)
-          _ -> Result.Err("expected zero parameter types")
-        end
+        sql_pair.second == <<0::16>>
+          ? Result.Ok(true)
+          : Result.Err("expected zero parameter types, got #{sql_pair.second}")
 
       _ ->
         Result.Err("parse message shorter than its header")
@@ -259,15 +256,11 @@ struct MessageTest
 
         # Body: portal "", statement "", 0 format codes, 2 params:
         # int32 2 + "42", int32 -1 (NULL), then 0 result formats.
-        match body
-          <<
-            0::8, 0::8, 0::16, 2::16, 2::32, 52::8, 50::8, 4294967295::32, 0::16
-          >> ->
-            Result.Ok(true)
+        expected = <<0, 0, 0::16, 2::16, 2::32, 52, 50, 4294967295::32, 0::16>>
 
-          _ ->
-            Result.Err("bind body bytes did not match the expected layout")
-        end
+        body == expected
+          ? Result.Ok(true)
+          : Result.Err("bind body #{body} != expected #{expected}")
 
       _ ->
         Result.Err("bind message shorter than its header")
@@ -276,20 +269,17 @@ struct MessageTest
 
   @test "DESCRIBE_PORTAL, EXECUTE, and SYNC frame correctly"
   fn test_describe_execute_sync -> Result<Bool, String>
-    match DESCRIBE_PORTAL
-      <<0x44::8, 6::32, 0x50::8, 0::8>> -> ()
-      _ -> return Result.Err("unexpected Describe frame")
+    unless DESCRIBE_PORTAL == <<0x44, 6::32, 0x50, 0>>
+      return Result.Err("unexpected Describe frame: #{DESCRIBE_PORTAL}")
     end
 
-    match EXECUTE
-      <<0x45::8, 9::32, 0::8, 0::32>> -> ()
-      _ -> return Result.Err("unexpected Execute frame")
+    unless EXECUTE == <<0x45, 9::32, 0, 0::32>>
+      return Result.Err("unexpected Execute frame: #{EXECUTE}")
     end
 
-    match SYNC
-      <<0x53::8, 4::32>> -> Result.Ok(true)
-      _ -> Result.Err("unexpected Sync frame")
-    end
+    SYNC == <<0x53, 4::32>>
+      ? Result.Ok(true)
+      : Result.Err("unexpected Sync frame: #{SYNC}")
   end
 
   @test "decode recognizes the extended-protocol responses"
